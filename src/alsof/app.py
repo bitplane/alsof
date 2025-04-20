@@ -1,6 +1,5 @@
 import datetime
 import logging
-import sys
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -9,16 +8,7 @@ from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Header, Label, Log, Static
 
-# Assume monitor.py and versioned.py are importable
-try:
-    from monitor import FileInfo, Monitor
-except ImportError as e:
-    print(
-        f"ERROR: Failed to import 'Monitor' or 'FileInfo' from 'monitor.py'. "
-        f"Ensure 'monitor.py' exists and is importable. Details: {e}",
-        file=sys.stderr,
-    )
-    sys.exit(f"Missing dependency: {e}")
+from alsof.monitor import FileInfo, Monitor
 
 # --- Setup Logging ---
 # Configure basic logging; callers can override this configuration.
