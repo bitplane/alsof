@@ -12,15 +12,8 @@ import time
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
 from alsof import strace  # Import the adapter module
-
-# --- Import Core Components using absolute package paths ---
-# Assuming monitor.py, strace.py, strace_cmd.py, versioned.py
-# are part of the 'alsof' package.
-# Import guard removed.
+from alsof import app
 from alsof.monitor import Monitor
-
-# Other potential backends could be imported here
-
 
 # --- Setup Logging ---
 logging.basicConfig(
@@ -215,26 +208,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     log.info("Attempting to launch UI...")
     exit_code = 0
     try:
-        # Use absolute import for the app module within the package
-        import alsof.app as app
-
         log.info("Launching app.main()...")
-        # Pass the monitor instance to the app's main function
         app.main(monitor=monitor)
         log.info("UI main function finished.")
-
-    except ImportError:
-        log.warning("UI module 'app.py' not found.")
-        log.info("Backend monitoring running in background. Press Ctrl+C to stop.")
-        try:
-            while backend_thread.is_alive():
-                time.sleep(0.5)  # Check periodically, allows Ctrl+C
-        except KeyboardInterrupt:
-            log.info("\nCtrl+C detected in main loop.")
-            exit_code = 130
-        except Exception as e:
-            log.exception(f"Error while waiting for backend thread: {e}")
-            exit_code = 1
     except Exception as e:
         log.exception(f"An unexpected error occurred launching or running the UI: {e}")
         exit_code = 1

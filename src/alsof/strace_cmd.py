@@ -1,6 +1,5 @@
-#!/usr/bin/env python3
+# Filename: strace_cmd.py
 
-import argparse
 import contextlib
 import logging
 import os
@@ -8,13 +7,12 @@ import re
 import shlex
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 from dataclasses import dataclass
-from typing import Dict, Iterator, List, Optional
+from typing import Dict, Iterator, List, Optional  # Removed Any, sys, argparse
 
-import psutil  # <-- Import psutil
+import psutil  # For initial PID lookup
 
 # --- Setup Logging ---
 logging.basicConfig(
@@ -24,7 +22,6 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # --- Configuration ---
-# Add clone/fork/vfork to syscalls traced for PID/TID mapping
 PROCESS_SYSCALLS = ["clone", "fork", "vfork"]
 FILE_STRUCT_SYSCALLS = [
     "open",
@@ -48,15 +45,16 @@ IO_SYSCALLS = [
     "pwrite64",
     "writev",
 ]
+# Default list includes necessary process calls plus common file I/O
 DEFAULT_SYSCALLS = sorted(
     list(set(PROCESS_SYSCALLS + FILE_STRUCT_SYSCALLS + IO_SYSCALLS))
 )
 
 STRACE_BASE_OPTIONS = [
-    "-f",
+    "-f",  # Follow forks/threads/clones
     "-s",
-    "4096",
-    "-qq",
+    "4096",  # Capture long strings (paths, data)
+    "-qq",  # Suppress informational messages from strace itself
 ]
 
 # --- Data Structures ---
@@ -68,25 +66,24 @@ class Syscall:
 
     timestamp: float
     tid: int  # Thread ID (from strace prefix)
-    pid: int  # Process ID / Thread Group ID (TGID)
+    pid: int  # Process ID / Thread Group ID (TGID) - Resolved by parser
     syscall: str
-    args: List[str]  # List of raw argument strings
+    args: List[str]  # List of raw argument strings (split by state machine)
     result_str: str  # Raw result string
     error_name: Optional[str] = None
     error_msg: Optional[str] = None
-    # extracted_path field removed
 
 
 # --- Regex and Parsing Helpers ---
 
 STRACE_LINE_RE = re.compile(
-    r"^(?P<tid>\d+)\s+"  # <-- Changed group name pid -> tid
-    r"(?:\[\d+\]\s+)?"
-    r"(?P<syscall>\w+)\("
-    r"(?P<args>.*?)"
-    r"\)\s+=\s+"
-    r"(?P<result>-?\d+|0x[\da-fA-F]+)"
-    r"(?:\s+(?P<error>[A-Z_]+)\s+\((?P<errmsg>.*?)\))?"
+    r"^(?P<tid>\d+)\s+"  # Capture TID at the start
+    r"(?:\[\d+\]\s+)?"  # Optional core ID for multi-core systems
+    r"(?P<syscall>\w+)\("  # Syscall name
+    r"(?P<args>.*?)"  # Non-greedy capture of args inside parens
+    r"\)\s+=\s+"  # Separator
+    r"(?P<result>-?\d+|0x[\da-fA-F]+)"  # Result (decimal or hex)
+    r"(?:\s+(?P<error>[A-Z_]+)\s+\((?P<errmsg>.*?)\))?"  # Optional error
 )
 
 
@@ -94,7 +91,6 @@ def _parse_args_state_machine(args_str: str) -> List[str]:
     """
     Parses the strace arguments string by splitting on top-level commas,
     respecting basic nesting of (), {}, and "" quotes.
-    (Implementation unchanged)
     """
     args = []
     if not args_str:
@@ -127,14 +123,31 @@ def _parse_args_state_machine(args_str: str) -> List[str]:
     return args
 
 
-# --- Temporary FIFO Context Manager (Unchanged) ---
+def _parse_result_int(result_str: str) -> Optional[int]:
+    """Parses strace result string (dec/hex) into an integer."""
+    # Simple internal helper for PID/TID mapping
+    if not result_str:
+        return None
+    try:
+        return int(result_str, 0)
+    except ValueError:
+        return None
+
+
+# --- Temporary FIFO Context Manager ---
 @contextlib.contextmanager
 def temporary_fifo() -> Iterator[str]:
+    """
+    Context manager that creates a temporary FIFO in a temporary directory.
+    Yields the absolute path to the created FIFO.
+    Ensures the FIFO and directory are cleaned up afterwards.
+    """
     fifo_path = None
     temp_dir = None
     try:
+        # TemporaryDirectory cleans itself up on context exit
         with tempfile.TemporaryDirectory(prefix="strace_fifo_") as temp_dir_path:
-            temp_dir = temp_dir_path
+            temp_dir = temp_dir_path  # Store path for logging
             fifo_path = os.path.join(temp_dir, "strace_output.fifo")
             os.mkfifo(fifo_path)
             log.info(f"Created FIFO: {fifo_path}")
@@ -144,12 +157,12 @@ def temporary_fifo() -> Iterator[str]:
     except Exception as e:
         raise RuntimeError(f"Failed to set up temporary directory/FIFO: {e}") from e
     finally:
+        # Cleanup is handled by TemporaryDirectory context manager
         if fifo_path:
             log.info(f"FIFO {fifo_path} will be cleaned up.")
 
 
 # --- Low-level Strace Output Streamer ---
-# Signature changed to accept target_command OR attach_ids
 def stream_strace_output(
     target_command: Optional[List[str]] = None,
     attach_ids: Optional[List[int]] = None,
@@ -169,7 +182,7 @@ def stream_strace_output(
     if not strace_path:
         raise FileNotFoundError("Could not find 'strace' executable in PATH.")
 
-    proc = None
+    proc: Optional[subprocess.Popen] = None
     fifo_reader = None
 
     try:
@@ -179,13 +192,11 @@ def stream_strace_output(
             strace_command.extend(["-o", fifo_path])
 
             if target_command:
-                # Use '--' to separate strace options from the target command
                 strace_command.extend(["--", *target_command])
                 log.info(
                     f"Preparing to launch: {' '.join(shlex.quote(c) for c in target_command)}"
                 )
             elif attach_ids:
-                # Add -p PID for each ID to attach to
                 for pid_or_tid in attach_ids:
                     strace_command.extend(["-p", str(pid_or_tid)])
                 log.info(f"Preparing to attach to IDs: {attach_ids}")
@@ -194,7 +205,7 @@ def stream_strace_output(
             proc = subprocess.Popen(
                 strace_command,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.PIPE,  # Capture strace's own errors
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -202,6 +213,7 @@ def stream_strace_output(
 
             log.info(f"Opening FIFO {fifo_path} for reading...")
             try:
+                # Blocking open waits for strace to open it for writing
                 fifo_reader = open(fifo_path, "r", encoding="utf-8", errors="replace")
                 log.info("FIFO opened. Reading stream...")
             except Exception as e:
@@ -217,7 +229,9 @@ def stream_strace_output(
                 else:
                     raise RuntimeError(f"Failed to open FIFO for reading: {e}") from e
 
-            time.sleep(0.1)  # Check for quick exit
+            # Check for quick exit after FIFO open attempt
+            # Give strace a moment to potentially error out
+            time.sleep(0.1)
             proc_exit_code = proc.poll()
             if proc_exit_code is not None:
                 stderr_output = proc.stderr.read() if proc.stderr else ""
@@ -227,6 +241,7 @@ def stream_strace_output(
                 log.warning(
                     f"Strace process exited quickly (code {proc_exit_code}). Target command/attach issue?{stderr_msg}"
                 )
+                # Don't raise here, might still be data in FIFO
 
             if fifo_reader:
                 for line in fifo_reader:
@@ -235,8 +250,11 @@ def stream_strace_output(
                 fifo_reader.close()
                 fifo_reader = None
             else:
-                log.warning("No FIFO reader available or stream was empty.")
+                log.warning(
+                    "No FIFO reader available or stream was empty (process might have exited quickly)."
+                )
 
+            # Wait for process completion and check stderr
             stderr_output = ""
             if proc.stderr:
                 stderr_output = proc.stderr.read()
@@ -244,7 +262,7 @@ def stream_strace_output(
             if stderr_output.strip():
                 log.warning(f"Strace stderr output:\n{stderr_output.strip()}")
 
-            exit_code = proc.wait()
+            exit_code = proc.wait()  # Wait for strace process termination
             log.info(f"Strace process exited with code {exit_code}.")
 
     except FileNotFoundError:
@@ -253,6 +271,7 @@ def stream_strace_output(
         raise
     except Exception as e:
         log.exception(f"An error occurred during strace execution: {e}")
+        # Don't re-raise here, allow finally block to run
     finally:
         log.info("Cleaning up stream_strace_output...")
         if proc and proc.poll() is None:
@@ -263,14 +282,15 @@ def stream_strace_output(
             try:
                 proc.wait(timeout=0.5)
             except subprocess.TimeoutExpired:
+                log.warning("Process did not terminate gracefully, killing...")
                 proc.kill()
             log.info("Strace process terminated on cleanup.")
-        if fifo_reader:
+        if fifo_reader:  # Should be None if closed normally
             try:
                 fifo_reader.close()
             except Exception:
                 pass
-        # FIFO/tempdir cleanup handled by context manager
+        # FIFO path and temp dir cleanup handled by context manager exit
 
 
 # --- Generator: Parsing the Stream ---
@@ -282,8 +302,8 @@ def parse_strace_stream(
     syscalls: List[str] = DEFAULT_SYSCALLS,
 ) -> Iterator[Syscall]:
     """
-    Runs strace (launch or attach) and parses the raw output lines
-    into Syscall objects, tracking TID -> PID mapping.
+    Runs strace (launch or attach) via stream_strace_output, parses the raw lines
+    into Syscall objects, and resolves TIDs to PIDs (TGIDs).
     """
     if not target_command and not attach_ids:
         raise ValueError("Must provide either target_command or attach_ids.")
@@ -298,183 +318,95 @@ def parse_strace_stream(
         log.info(f"Pre-populating TID->PID map for attach IDs: {attach_ids}")
         for initial_tid in attach_ids:
             try:
+                # Check existence first to avoid warnings on expected missing TIDs
+                if not psutil.pid_exists(initial_tid):
+                    log.warning(f"Initial TID {initial_tid} does not exist. Skipping.")
+                    continue
                 proc_info = psutil.Process(initial_tid)
-                # In psutil, pid attribute gives the TGID (main process PID)
-                tid_to_pid_map[initial_tid] = proc_info.pid
-                log.debug(f"Mapped initial TID {initial_tid} to PID {proc_info.pid}")
+                pid = proc_info.pid  # Get TGID
+                tid_to_pid_map[initial_tid] = pid
+                log.debug(f"Mapped initial TID {initial_tid} to PID {pid}")
             except psutil.NoSuchProcess:
                 log.warning(
-                    f"Process/Thread with TID {initial_tid} not found during initial mapping."
+                    f"Process/Thread with TID {initial_tid} disappeared during initial mapping."
                 )
             except psutil.AccessDenied:
                 log.warning(
-                    f"Access denied when getting PID for initial TID {initial_tid}. Mapping might be incomplete."
+                    f"Access denied getting PID for initial TID {initial_tid}. Mapping might be incomplete."
                 )
             except Exception as e:
                 log.error(f"Error getting PID for initial TID {initial_tid}: {e}")
 
     # --- Process Stream ---
-    for line in stream_strace_output(target_command, attach_ids, syscalls):
+    # Ensure process creation syscalls are traced for mapping
+    combined_syscalls = sorted(list(set(syscalls) | set(PROCESS_SYSCALLS)))
+
+    for line in stream_strace_output(target_command, attach_ids, combined_syscalls):
         timestamp = time.time()
         match = STRACE_LINE_RE.match(line.strip())
-        if match:
-            data = match.groupdict()
-            try:
-                tid = int(data["tid"])  # <-- Renamed group in regex
-                syscall = data["syscall"]
-                args_str = data["args"]
-                result_str = data["result"]
-                error_name = data.get("error")
-                error_msg = data.get("errmsg")
-
-                # --- Lookup/Determine PID (TGID) ---
-                pid = tid_to_pid_map.get(tid)
-                if pid is None:
-                    # If TID not in map, assume it's a main thread (TID=PID)
-                    # or we missed its creation (less likely with -f from start)
-                    # Try psutil lookup only if absolutely necessary? Might be slow.
-                    # For now, assume TID=PID if not found.
-                    pid = tid
-                    tid_to_pid_map[tid] = pid
-                    log.debug(f"TID {tid} not in map, assuming PID=TID.")
-                # --- End PID Lookup ---
-
-                # Parse arguments using state machine
-                parsed_args_list = _parse_args_state_machine(args_str)
-
-                # --- Update map on clone/fork success ---
-                if syscall in PROCESS_SYSCALLS and error_name is None:
-                    try:
-                        # Result is the new TID (clone) or PID (fork/vfork) in parent
-                        if result_str.startswith("0x"):
-                            new_id = int(result_str, 16)
-                        else:
-                            new_id = int(result_str)
-
-                        if new_id > 0:  # Parent context receiving child ID
-                            # The new thread/process inherits the parent's PID (TGID)
-                            # Map the new child TID/PID to the *current* process's PID (TGID)
-                            if new_id not in tid_to_pid_map:
-                                tid_to_pid_map[new_id] = pid
-                                log.info(
-                                    f"Syscall {syscall}: Mapped new TID/PID {new_id} to parent PID {pid}"
-                                )
-                            # else: Mapping already exists (e.g. saw attach message earlier?)
-                    except ValueError:
-                        log.warning(
-                            f"Could not parse result '{result_str}' for {syscall} to get new TID/PID."
-                        )
-                    except Exception as map_e:
-                        log.error(f"Error updating TID map for {syscall}: {map_e}")
-                # --- End Map Update ---
-
-                yield Syscall(
-                    timestamp=timestamp,
-                    tid=tid,  # Thread ID from strace line
-                    pid=pid,  # Process ID (TGID) from map
-                    syscall=syscall,
-                    args=parsed_args_list,
-                    result_str=result_str,
-                    error_name=error_name,
-                    error_msg=error_msg,
-                )
-            except Exception as parse_exc:
-                log.error(f"Error parsing matched line: {line.strip()} -> {parse_exc}")
-        else:
+        if not match:
             log.debug(f"Unmatched strace line: {line.strip()}")
-            pass
+            continue  # Skip unmatched lines
+
+        data = match.groupdict()
+        try:
+            tid = int(data["tid"])
+            syscall = data["syscall"]
+            args_str = data["args"]
+            result_str = data["result"]
+            error_name = data.get("error")
+            error_msg = data.get("errmsg")
+            success = error_name is None  # Determine success early
+
+            # --- Lookup/Determine PID (TGID) ---
+            pid = tid_to_pid_map.get(tid)
+            if pid is None:
+                # If TID not in map, assume it's a main thread (TID=PID)
+                # or we missed its creation (attach mode to non-main thread?)
+                # We could try psutil lookup here, but it's slow per-event.
+                # Defaulting TID=PID is usually correct for the initial process
+                # and clone/fork handling should catch descendants.
+                pid = tid
+                tid_to_pid_map[tid] = pid
+                log.debug(f"TID {tid} not in map, assuming PID=TID.")
+            # --- End PID Lookup ---
+
+            # Parse arguments using state machine
+            parsed_args_list = _parse_args_state_machine(args_str)
+
+            # --- Update map on clone/fork success ---
+            if syscall in PROCESS_SYSCALLS and success:
+                try:
+                    result_code = _parse_result_int(result_str)
+                    if (
+                        result_code is not None and result_code > 0
+                    ):  # Parent context receiving child ID
+                        new_id = result_code
+                        if new_id not in tid_to_pid_map:
+                            tid_to_pid_map[new_id] = (
+                                pid  # Map new TID/PID to parent's PID (TGID)
+                            )
+                            log.info(
+                                f"Syscall {syscall}: Mapped new TID/PID {new_id} to parent PID {pid}"
+                            )
+                except Exception as map_e:
+                    log.error(f"Error updating TID map for {syscall}: {map_e}")
+            # --- End Map Update ---
+
+            yield Syscall(
+                timestamp=timestamp,
+                tid=tid,
+                pid=pid,  # Resolved PID (TGID)
+                syscall=syscall,
+                args=parsed_args_list,
+                result_str=result_str,
+                error_name=error_name,
+                error_msg=error_msg,
+            )
+        except Exception as parse_exc:
+            log.error(f"Error parsing matched line: {line.strip()} -> {parse_exc}")
 
 
-# --- Main Execution Function ---
-
-
-def main(argv: Optional[List[str]] = None) -> int:
-    """
-    Parses command line arguments, runs the parse_strace_stream generator,
-    and prints the structured output. Returns an exit code.
-    """
-    log_level = os.environ.get("LOGLEVEL", "INFO").upper()
-    if log_level not in ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]:
-        log_level = "INFO"
-    logging.basicConfig(
-        level=log_level, format="%(asctime)s %(levelname)s:%(name)s:%(message)s"
-    )
-    log.info(f"Log level set to {log_level}")
-
-    parser = argparse.ArgumentParser(
-        description="Runs or attaches to a command under strace and prints parsed syscall events.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Examples:\n"
-        "  python3 %(prog)s -c find . -maxdepth 1\n"
-        "  sudo python3 %(prog)s -p 1234 5678\n"
-        "  sudo python3 %(prog)s -c sleep 60",
-    )
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument(
-        "-c",
-        "--command",
-        nargs=argparse.REMAINDER,
-        help="The target command and its arguments to launch and trace.",
-    )
-    group.add_argument(
-        "-p",
-        "--pids",
-        nargs="+",
-        type=int,
-        metavar="PID_OR_TID",
-        help="One or more existing process or thread IDs to attach to.",
-    )
-    # TODO: Add optional --syscalls argument via command line
-
-    args = parser.parse_args(argv)
-
-    # Determine mode and arguments
-    target_command: Optional[List[str]] = None
-    attach_ids: Optional[List[int]] = None
-
-    if args.command:
-        if not args.command:  # Should be caught by REMAINDER but safety check
-            log.critical("No command provided for -c.")
-            parser.print_usage(sys.stderr)
-            return 1
-        target_command = args.command
-    elif args.pids:
-        attach_ids = args.pids
-    else:
-        # Should be caught by argparse group 'required=True'
-        log.critical("Must provide either -c or -p.")
-        parser.print_usage(sys.stderr)
-        return 1
-
-    if os.geteuid() != 0:
-        log.warning(
-            "Running without root. 'strace' requires privileges (run this script with sudo)."
-        )
-
-    try:
-        log.info("Starting trace and parsing...")
-        event_count = 0
-        # Call the parser with the correct arguments based on mode
-        for syscall_event in parse_strace_stream(
-            target_command=target_command, attach_ids=attach_ids
-        ):
-            print(repr(syscall_event))  # Print the structured Syscall object
-            event_count += 1
-        log.info(f"Finished processing {event_count} syscall events.")
-        return 0  # Success
-
-    except (ValueError, FileNotFoundError, RuntimeError) as e:
-        log.error(f"Execution failed: {e}")
-        return 1
-    except KeyboardInterrupt:
-        log.info("\nCtrl+C detected. Exiting main script.")
-        return 130
-    except Exception as e:
-        log.exception(f"An unexpected error occurred in main: {e}")
-        return 1
-
-
-# --- Script Entry Point ---
-
-if __name__ == "__main__":
-    sys.exit(main())
+# --- Main function and entry point removed ---
+# This module is now intended only for import.
+# Testing should be done via strace.py or dedicated test files.

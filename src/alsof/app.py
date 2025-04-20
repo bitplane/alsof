@@ -1,18 +1,38 @@
+#!/usr/bin/env python3
+
+# Filename: app.py
+
 import datetime
 import logging
+import sys  # Keep for sys.exit if import fails
+import time
+from collections import deque
+from typing import Any, Dict, List, Optional  # Keep Any for details dict
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container
 from textual.reactive import reactive
-from textual.screen import ModalScreen
+from textual.screen import ModalScreen, Screen
+
+# Import Text for potential cell styling if needed later
+from textual.text import Text
 from textual.widgets import DataTable, Footer, Header, Label, Log, Static
 
-from alsof.monitor import FileInfo, Monitor
+# Assume monitor.py and versioned.py are importable via the package
+try:
+    # Use absolute package import
+    from alsof.monitor import FileInfo, Monitor
+except ImportError as e:
+    print(
+        f"ERROR: Failed to import 'Monitor' or 'FileInfo' from 'alsof.monitor'. "
+        f"Ensure package is installed correctly. Details: {e}",
+        file=sys.stderr,
+    )
+    sys.exit(f"Missing dependency: {e}")
 
 # --- Setup Logging ---
-# Configure basic logging; callers can override this configuration.
-log = logging.getLogger(__name__)  # Use module name
+log = logging.getLogger("alsof.app")  # Use package-aware logger name
 
 
 # --- Utility ---
@@ -25,7 +45,6 @@ def truncate_middle(text: str, max_length: int) -> str:
 
     ellipsis = "..."
     keep_len = max_length - len(ellipsis)
-    # Prioritize keeping more of the end (filename)
     end_len = min(len(text) // 2 + 1, keep_len * 2 // 3, len(text) - 1)
     start_len = keep_len - end_len
     if start_len < 0:
@@ -36,8 +55,11 @@ def truncate_middle(text: str, max_length: int) -> str:
     end_len = min(end_len, len(text))
 
     if start_len + end_len > len(text):
-        start_len = keep_len // 2
+        start_len = max(0, keep_len // 2)
         end_len = keep_len - start_len
+
+    start_len = max(0, start_len)
+    end_len = max(0, end_len)
 
     return f"{text[:start_len]}{ellipsis}{text[len(text)-end_len:]}"
 
@@ -59,14 +81,14 @@ class DetailScreen(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         yield Container(
             Label(f"Event History for: {self.file_info.path}"),
-            Log(id="event-log", max_lines=1000, markup=True),  # Use Log widget
+            Log(id="event-log", max_lines=1000, markup=True),
             id="detail-container",
         )
 
     def on_mount(self) -> None:
         """Populate the log on mount."""
         log_widget = self.query_one(Log)
-        history = self.file_info.event_history  # deque of dicts
+        history = self.file_info.event_history
         if not history:
             log_widget.write_line("No event history recorded.")
             return
@@ -76,14 +98,25 @@ class DetailScreen(ModalScreen[None]):
             "-----------------|----------|---------|--------------------"
         )
         for event in history:
-            ts = datetime.datetime.fromtimestamp(event.get("ts", 0)).strftime(
-                "%H:%M:%S.%f"
-            )[:-3]
+            ts_raw = event.get("ts", 0)
+            try:
+                ts = datetime.datetime.fromtimestamp(ts_raw).strftime("%H:%M:%S.%f")[
+                    :-3
+                ]
+            except (TypeError, ValueError):
+                ts = str(ts_raw)
+
             etype = str(event.get("type", "?")).ljust(8)
             success = "[green]OK[/]" if event.get("success", False) else "[red]FAIL[/]"
-            success = success.ljust(16)  # Pad markup string correctly
+            visible_len = 2 if event.get("success", False) else 4
+            padding = " " * (7 - visible_len)
+            success_padded = f"{success}{padding}"
+
             details = str(event.get("details", {}))
-            log_widget.write_line(f"{ts} | {etype} | {success} | {details}")
+            details_display = details[:100] + "..." if len(details) > 100 else details
+            log_widget.write_line(
+                f"{ts} | {etype} | {success_padded} | {details_display}"
+            )
 
 
 # --- Main Application ---
@@ -101,36 +134,37 @@ class FileApp(App[None]):
         Binding("enter", "show_details", "Show Details", show=True),
     ]
 
+    # Define CSS classes for row styling
     CSS = """
     Screen {
         /* layout: vertical; */
     }
-    #file-table {
+    DataTable {
         height: 1fr; /* Fill available space */
         border: thick $accent;
     }
     #status-bar {
         height: auto;
         dock: bottom;
+        color: $text-muted;
         padding: 0 1;
     }
-    /* Basic styling for DataTable rows */
+    /* Styling for DataTable rows - applied via add_row classes param */
     .deleted-row {
         text-style: strike;
         color: $text-muted;
     }
-    .error-row {
+    .error-row { /* For last_error_enoent or status=error */
         color: $error;
     }
     .open-row {
         text-style: bold;
     }
-    .stat-row {
+    .stat-row { /* For last_event_type=STAT */
         color: $warning; /* Yellowish */
     }
     """
 
-    # Reactive variable to store last seen monitor version
     last_monitor_version = reactive(-1)
 
     def __init__(self, monitor: Monitor):
@@ -139,21 +173,19 @@ class FileApp(App[None]):
         self._update_interval = 1.0  # Seconds
 
     def compose(self) -> ComposeResult:
-        yield Header()  # Standard header widget
+        yield Header()
         yield DataTable(id="file-table", cursor_type="row", zebra_stripes=True)
-        yield Static(
-            id="status-bar", renderable="Status: Initializing..."
-        )  # Simple status bar
-        yield Footer()  # Standard footer for keybindings
+        yield Static("Status: Initializing...", id="status-bar")
+        yield Footer()
 
     def on_mount(self) -> None:
         """Called when the app widget is mounted."""
         table = self.query_one(DataTable)
         table.add_column("?", key="emoji", width=3)
-        table.add_column("Activity", key="activity", width=10)  # Bytes/Status
-        table.add_column("Path", key="path", width=None)  # Flexible width
+        table.add_column("Activity", key="activity", width=10)
+        table.add_column("Path", key="path")
 
-        # Start the periodic update timer
+        self.update_table()  # Initial population
         self.set_interval(self._update_interval, self.update_table)
         self.update_status("Monitoring started...")
         log.info("UI Mounted, starting update timer.")
@@ -168,42 +200,43 @@ class FileApp(App[None]):
 
     def _get_emoji_for_file(self, info: FileInfo) -> str:
         """Determines an emoji based on recent activity."""
-        # Simple logic for now, can be expanded
-        if not info.recent_event_types:
-            return " "  # Blank if no recent events
-
-        last_type = info.recent_event_types[-1]  # Most recent type
-
         if info.status == "deleted":
             return "❌"
-        if info.status == "error":
+        if info.status == "error" or info.last_error_enoent:
             return "❗"
-        if last_type == "OPEN":
-            return "✅"  # Opened
-        if last_type == "CLOSE":
-            return "🚪"  # Closed
-        if last_type == "READ" and last_type == "WRITE":
-            return "↔️"  # Read/Write
-        if last_type == "READ":
-            return "⬇️"  # Read
-        if last_type == "WRITE":
-            return "⬆️"  # Write
-        if last_type == "STAT":
-            return "👀"  # Stat/Access
-        if last_type == "RENAME":
-            return "🔄"  # Rename (if added back)
 
-        return "❔"  # Unknown/Other
+        recent_types = [t for t in info.recent_event_types]
+        if not recent_types:
+            return "❔" if info.status == "unknown" else " "
+
+        has_read = "READ" in recent_types
+        has_write = "WRITE" in recent_types
+
+        if has_read and has_write:
+            return "↔️"
+        if has_write:
+            return "⬆️"
+        if has_read:
+            return "⬇️"
+        if "OPEN" in recent_types:
+            return "✅"
+        if "STAT" in recent_types:
+            return "👀"
+        if "RENAME" in recent_types:
+            return "🔄"
+        if "CLOSE" in recent_types:
+            return "🚪"
+
+        return "❔"
 
     def update_table(self) -> None:
         """Called by the timer to refresh the DataTable."""
         if not self.monitor:
-            return  # Should not happen
+            return
 
         current_version = self.monitor.version
         if current_version == self.last_monitor_version:
-            # log.debug("Monitor version unchanged, skipping table update.")
-            return  # No changes in the monitor state
+            return
 
         log.info(
             f"Monitor version changed ({self.last_monitor_version} -> {current_version}), updating table."
@@ -215,36 +248,34 @@ class FileApp(App[None]):
             status_bar = self.query_one("#status-bar", Static)
         except Exception:
             log.warning("Could not query table/status bar, possibly shutting down.")
-            return  # Widgets might not exist during shutdown
+            return
 
         # --- Calculate available width for path ---
-        # This needs to account for borders, padding etc. more accurately
         other_cols_width = 0
+        col_count = 0
         for key, col in table.columns.items():
+            col_count += 1
             if key != "path":
-                other_cols_width += col.content_width  # Use content_width
-        # Estimate borders/padding (adjust as needed)
+                other_cols_width += col.content_width
         table_width = table.size.width
-        padding = 4
+        padding = max(0, col_count - 1) + 2
         available_width = max(10, table_width - other_cols_width - padding)
 
         # --- Get and Sort Data ---
-        # Use the iterator, filter/sort here
-        all_files = list(self.monitor)  # Get FileInfo objects via __iter__
-        # Separate ignored files? For now, filter them out before display
+        all_files = list(self.monitor)
         active_files = [
             info for info in all_files if info.path not in self.monitor.ignored_paths
         ]
-        # Sort active files by last activity time
         active_files.sort(key=lambda info: info.last_activity_ts, reverse=True)
 
         # --- Preserve Cursor ---
         selected_path_key = None
-        try:
-            if table.is_valid_coordinate(table.cursor_coordinate):
-                selected_path_key = table.get_row_key(table.cursor_coordinate.row)
-        except Exception:
-            pass  # Ignore errors getting cursor
+        cursor_row = table.cursor_row
+        if cursor_row >= 0 and cursor_row < table.row_count:
+            try:
+                selected_path_key = table.get_row_key(cursor_row)
+            except Exception:
+                pass
 
         # --- Update Table ---
         table.clear()
@@ -252,52 +283,57 @@ class FileApp(App[None]):
 
         for info in active_files:
             if info.path in row_keys_added:
-                continue  # Should not happen if self.files keys are unique
+                continue
 
             row_key = info.path
             row_keys_added.add(row_key)
 
-            # Determine Style & Content
             emoji = self._get_emoji_for_file(info)
             path_display = truncate_middle(info.path, available_width)
-            # Activity column: show bytes or status?
             activity_str = (
                 f"{info.bytes_read}r/{info.bytes_written}w"
                 if (info.bytes_read or info.bytes_written)
                 else info.status
             )
 
-            style = ""
+            # Determine CSS class based on state
+            css_class: Optional[str] = None
             if info.status == "deleted":
-                style = "strike"
-            elif info.last_error_enoent:  # Check for file not found specifically
-                style = "red"  # Use direct styling for red
+                css_class = "deleted-row"
+            elif info.last_error_enoent:
+                css_class = "error-row"  # Specific error
             elif info.status == "error":
-                style = "red"  # General error red
+                css_class = "error-row"  # General error
             elif info.is_open:
-                style = "bold"
+                css_class = "open-row"
             elif info.last_event_type == "STAT":
-                style = "yellow"  # Direct styling for yellow
+                css_class = "stat-row"
 
-            # Add row with styling
+            # Add row using classes argument
             table.add_row(
-                f" {emoji} ",  # Add space around emoji
+                f" {emoji} ",
                 activity_str,
                 path_display,
                 key=row_key,
-                style=style,
-                # classes=css_class # Using classes is another option
+                classes=css_class,  # Use classes instead of style
             )
 
         # --- Restore Cursor ---
+        new_row_index = -1
         if selected_path_key and table.is_valid_row_key(selected_path_key):
-            table.move_cursor(row_key=selected_path_key, animate=False)
+            try:
+                new_row_index = table.get_row_index(selected_path_key)
+            except Exception:
+                pass
+
+        if new_row_index != -1:
+            table.move_cursor(row=new_row_index, animate=False)
         elif table.row_count > 0:
             table.move_cursor(row=0, animate=False)
 
         # Update status bar
         status_bar.update(
-            f"Tracking {len(active_files)} files. Version: {current_version}"
+            f"Tracking {len(active_files)} files. Ignored: {len(self.monitor.ignored_paths)}. Version: {current_version}"
         )
 
     # --- Action Handlers ---
@@ -318,8 +354,7 @@ class FileApp(App[None]):
             if row_key:
                 path_to_ignore = str(row_key)
                 log.info(f"Ignoring selected path: {path_to_ignore}")
-                self.monitor.ignore(path_to_ignore)  # Call monitor method
-                self.update_table()  # Trigger immediate update
+                self.monitor.ignore(path_to_ignore)
                 self.notify(f"Ignored: {path_to_ignore}", timeout=2)
             else:
                 self.notify(
@@ -333,10 +368,13 @@ class FileApp(App[None]):
         """Ignore all currently tracked files."""
         log.info("Ignoring all tracked files.")
         try:
-            count_before = len(self.monitor)
-            self.monitor.ignore_all()  # Call monitor method
-            count_after = len(self.monitor)
-            self.update_table()  # Trigger immediate update
+            count_before = len(
+                [fi for fi in self.monitor if fi.path not in self.monitor.ignored_paths]
+            )
+            self.monitor.ignore_all()
+            count_after = len(
+                [fi for fi in self.monitor if fi.path not in self.monitor.ignored_paths]
+            )
             self.notify(f"Ignored {count_before - count_after} files.", timeout=2)
         except Exception as e:
             log.exception(f"Error ignoring all files: {e}")
@@ -354,8 +392,7 @@ class FileApp(App[None]):
             row_key = table.get_row_key(table.cursor_coordinate.row)
             if row_key:
                 path = str(row_key)
-                # Use __getitem__ on monitor
-                file_info = self.monitor[path]
+                file_info = self.monitor[path]  # Use __getitem__
                 log.info(f"Showing details for: {path}")
                 self.push_screen(DetailScreen(file_info))
             else:
@@ -379,8 +416,6 @@ class FileApp(App[None]):
 
 def main(monitor: Monitor):
     """Runs the Textual application."""
-    # Setup logging potentially based on monitor or global config?
-    # For now, assume logging is configured by cli.py
     log.info("Initializing Textual App...")
     app = FileApp(monitor=monitor)
     app.run()
