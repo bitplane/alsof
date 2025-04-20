@@ -1,6 +1,10 @@
-# 
+# `alsof` - list open files GUI
 
-Gemini 2.5 Pro coding test: a TUI that lists open files 
+Gemini 2.5 Pro coding test: a TUI that lists open files for a given process.
 
-IMO over-engineered slop, but it's a tool that I wanted and it made it with 
+IMO this is over-engineered slop. I suspect the model was trained on finished
+projects then fine-tuned to produce code that is BEST CORRECT according to
+people who aren't Python devs.
 
+The result kinda works, but it's high cognitive load and deeply nested special
+cases by default.

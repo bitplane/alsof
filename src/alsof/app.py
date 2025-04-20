@@ -1,41 +1,22 @@
-#!/usr/bin/env python3
-
 # Filename: app.py
 
 import datetime
 import logging
-import sys  # Keep for sys.exit if import fails
-import time
-from collections import deque
-from typing import Any, Dict, List, Optional  # Keep Any for details dict
 
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container
 from textual.reactive import reactive
-from textual.screen import ModalScreen, Screen
-
-# Import Text for potential cell styling if needed later
-from textual.text import Text
+from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Header, Label, Log, Static
 
 # Assume monitor.py and versioned.py are importable via the package
-try:
-    # Use absolute package import
-    from alsof.monitor import FileInfo, Monitor
-except ImportError as e:
-    print(
-        f"ERROR: Failed to import 'Monitor' or 'FileInfo' from 'alsof.monitor'. "
-        f"Ensure package is installed correctly. Details: {e}",
-        file=sys.stderr,
-    )
-    sys.exit(f"Missing dependency: {e}")
+from alsof.monitor import Monitor, FileInfo
 
-# --- Setup Logging ---
-log = logging.getLogger("alsof.app")  # Use package-aware logger name
+log = logging.getLogger("alsof.app")
 
 
-# --- Utility ---
 def truncate_middle(text: str, max_length: int) -> str:
     """Truncates text in the middle, preserving start and end."""
     if len(text) <= max_length:
@@ -62,9 +43,6 @@ def truncate_middle(text: str, max_length: int) -> str:
     end_len = max(0, end_len)
 
     return f"{text[:start_len]}{ellipsis}{text[len(text)-end_len:]}"
-
-
-# --- Detail Screen ---
 
 
 class DetailScreen(ModalScreen[None]):
@@ -119,9 +97,6 @@ class DetailScreen(ModalScreen[None]):
             )
 
 
-# --- Main Application ---
-
-
 class FileApp(App[None]):
     """Textual file monitor application."""
 
@@ -134,13 +109,12 @@ class FileApp(App[None]):
         Binding("enter", "show_details", "Show Details", show=True),
     ]
 
-    # Define CSS classes for row styling
+    # CSS can still define base styles if needed, but row-specific
+    # styles will be applied directly via Text objects.
     CSS = """
-    Screen {
-        /* layout: vertical; */
-    }
+    Screen { }
     DataTable {
-        height: 1fr; /* Fill available space */
+        height: 1fr;
         border: thick $accent;
     }
     #status-bar {
@@ -149,20 +123,11 @@ class FileApp(App[None]):
         color: $text-muted;
         padding: 0 1;
     }
-    /* Styling for DataTable rows - applied via add_row classes param */
-    .deleted-row {
-        text-style: strike;
-        color: $text-muted;
-    }
-    .error-row { /* For last_error_enoent or status=error */
-        color: $error;
-    }
-    .open-row {
-        text-style: bold;
-    }
-    .stat-row { /* For last_event_type=STAT */
-        color: $warning; /* Yellowish */
-    }
+    /* Keep class definitions if useful for other styling or targeting */
+    .deleted-row { }
+    .error-row { }
+    .open-row { }
+    .stat-row { }
     """
 
     last_monitor_version = reactive(-1)
@@ -185,7 +150,7 @@ class FileApp(App[None]):
         table.add_column("Activity", key="activity", width=10)
         table.add_column("Path", key="path")
 
-        self.update_table()  # Initial population
+        self.update_table()
         self.set_interval(self._update_interval, self.update_table)
         self.update_status("Monitoring started...")
         log.info("UI Mounted, starting update timer.")
@@ -296,26 +261,26 @@ class FileApp(App[None]):
                 else info.status
             )
 
-            # Determine CSS class based on state
-            css_class: Optional[str] = None
+            # Determine style string based on state
+            style = ""
             if info.status == "deleted":
-                css_class = "deleted-row"
+                style = "strike"
             elif info.last_error_enoent:
-                css_class = "error-row"  # Specific error
+                style = "red"
             elif info.status == "error":
-                css_class = "error-row"  # General error
+                style = "red"
             elif info.is_open:
-                css_class = "open-row"
+                style = "bold"
             elif info.last_event_type == "STAT":
-                css_class = "stat-row"
+                style = "yellow"
 
-            # Add row using classes argument
+            # Add row, applying style to each cell's Text object
             table.add_row(
-                f" {emoji} ",
-                activity_str,
-                path_display,
+                Text(f" {emoji} ", style=style),  # Apply style here
+                Text(activity_str, style=style),  # Apply style here
+                Text(path_display, style=style),  # Apply style here
                 key=row_key,
-                classes=css_class,  # Use classes instead of style
+                # Removed classes= argument
             )
 
         # --- Restore Cursor ---
