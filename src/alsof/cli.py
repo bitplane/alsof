@@ -9,40 +9,73 @@ import shlex
 import sys
 import threading
 import time
-from typing import Callable, List, Optional, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
-from alsof import strace
+from alsof import strace  # Import the adapter module
+
+# --- Import Core Components using absolute package paths ---
+# Assuming monitor.py, strace.py, strace_cmd.py, versioned.py
+# are part of the 'alsof' package.
+# Import guard removed.
 from alsof.monitor import Monitor
 
+# Other potential backends could be imported here
+
+
+# --- Setup Logging ---
 logging.basicConfig(
     level=os.environ.get("LOGLEVEL", "WARNING").upper(),
     format="%(levelname)s:%(name)s:%(message)s",
 )
-log = logging.getLogger(__name__)  # Logger for this module
+# Use package-aware logger name
+log = logging.getLogger("alsof.cli")
 
+# --- Backend Registry ---
+AttachFuncType = Callable[[List[int], Monitor], None]
+RunFuncType = Callable[[List[str], Monitor], None]
+BackendTuple = Tuple[AttachFuncType, RunFuncType]
 
-BACKENDS = {"strace": (strace.attach, strace.run)}
+BACKENDS: Dict[str, BackendTuple] = {}
+if (
+    hasattr(strace, "attach")
+    and callable(strace.attach)
+    and hasattr(strace, "run")
+    and callable(strace.run)
+):
+    BACKENDS["strace"] = (strace.attach, strace.run)
+    log.info("Registered strace backend.")
+else:
+    # This log might not appear if basicConfig level is WARNING
+    log.warning(
+        "Could not register strace backend (missing or non-callable attach/run functions)."
+    )
 
 DEFAULT_BACKEND = next(iter(BACKENDS.keys())) if BACKENDS else None
 
+# --- Backend Execution Thread ---
+
 
 def _run_backend_thread(
-    backend_func: Callable,  # Type hint could be more specific Union[attach_type, run_type]
+    backend_func: Callable,
     monitor_instance: Monitor,
-    target_args: Union[List[str], List[int]],  # Either command list or pid list
+    target_args: Union[List[str], List[int]],
 ):
     """Target function to run the selected backend in a thread."""
+    # Setup logging within the thread if necessary, or rely on root config
+    thread_log = logging.getLogger(f"{__name__}.backend")
     try:
-        log.info(
+        thread_log.info(
             f"Starting backend function {backend_func.__name__} in background thread..."
         )
         # We assume the backend function (run or attach) handles its own exceptions
         # and logging, and blocks until monitoring stops or fails.
-        backend_func(target_args, monitor_instance)  # type: ignore # Ignore type check if Callable is too generic
-        log.info(f"Backend function {backend_func.__name__} finished.")
+        backend_func(
+            target_args, monitor_instance
+        )  # Call the actual run/attach function
+        thread_log.info(f"Backend function {backend_func.__name__} finished.")
     except Exception as e:
         # Log any unexpected errors from the backend function itself
-        log.exception(
+        thread_log.exception(
             f"Unexpected error in backend thread {backend_func.__name__}: {e}"
         )
 
@@ -55,15 +88,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     Parses command line arguments, starts the selected backend in a thread,
     and attempts to launch the UI.
     """
-    # Configure logging level based on potential command-line arg or default
-    # This gets potentially reconfigured after parsing args.
+    # Configure root logger level based on default or env var initially
     initial_log_level = os.environ.get("LOGLEVEL", "INFO").upper()
     if initial_log_level not in ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]:
         initial_log_level = "INFO"
+    # Use basicConfig defaults, but ensure level is set.
+    # Note: Subsequent calls to basicConfig might not reconfigure if handlers exist.
+    # Consider using logging.getLogger().setLevel() after parsing args instead.
     logging.basicConfig(
         level=initial_log_level, format="%(asctime)s %(levelname)s:%(name)s:%(message)s"
     )
-    log.info(f"Initial log level set to {initial_log_level}")
+    log.info(f"Initial log level set to {initial_log_level}")  # Use module logger
 
     if not BACKENDS or DEFAULT_BACKEND is None:
         log.critical("No monitoring backends available!")
@@ -73,7 +108,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         description="Monitors file access for a command or process.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"Available backends: {', '.join(BACKENDS.keys())}\n"
-        "Example: python3 %(prog)s -b strace -- find . -maxdepth 1",
+        "Example: alsof -b strace -- find . -maxdepth 1",  # Updated example
     )
     parser.add_argument(
         "-b",
@@ -105,19 +140,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Attach: One or more existing process IDs (PIDs) to attach to.",
     )
 
-    # Simpler arg parsing assuming REMAINDER works correctly after known args
     args = parser.parse_args(argv)
 
-    # Reconfigure logging level based on args NOW
+    # Reconfigure root logger level based on args NOW
     logging.getLogger().setLevel(args.log.upper())
-    log.info(f"Log level set to {args.log.upper()}")
+    log.info(f"Log level set to {args.log.upper()}")  # Use module logger
 
     # --- Setup Monitoring ---
     target_command: Optional[List[str]] = None
     attach_ids: Optional[List[int]] = None
     monitor_id = "monitor_session"
-    backend_attach_func: Optional[Callable] = None
-    backend_run_func: Optional[Callable] = None
+    backend_attach_func: Optional[AttachFuncType] = None
+    backend_run_func: Optional[RunFuncType] = None
     backend_target_args: Optional[Union[List[str], List[int]]] = None
 
     selected_backend_funcs = BACKENDS.get(args.backend)
@@ -128,8 +162,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     backend_attach_func, backend_run_func = selected_backend_funcs
 
     if args.command:
-        # argparse.REMAINDER includes the '-c' if it wasn't handled specially.
-        # We need to handle the case where REMAINDER might be empty if only '-c' is given
+        # REMAINDER captures everything after the known args,
+        # need to ensure it doesn't capture flags meant for argparse if -c isn't last.
+        # This simple check assumes -c IS last or only flags before it are --log/--backend
         if not args.command:
             parser.error("argument -c/--command: expected one or more arguments")
         target_command = args.command
@@ -166,7 +201,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         target=_run_backend_thread,
         args=(backend_func_to_run, monitor, backend_target_args),
         name=f"{args.backend}_backend",
-        daemon=True,  # Allow main thread to exit even if backend is running
+        daemon=True,
     )
 
     try:
@@ -176,48 +211,40 @@ def main(argv: Optional[List[str]] = None) -> int:
         log.exception(f"Failed to start backend thread: {e}")
         return 1
 
-    # --- Launch UI (Placeholder) ---
+    # --- Launch UI ---
     log.info("Attempting to launch UI...")
+    exit_code = 0
     try:
-        # Assume app.py exists and has a main function accepting the monitor
-        import app
+        # Use absolute import for the app module within the package
+        import alsof.app as app
 
         log.info("Launching app.main()...")
-        # We assume app.main() blocks until the UI exits
-        # Pass monitor and potentially the backend thread if UI needs to manage it?
+        # Pass the monitor instance to the app's main function
         app.main(monitor=monitor)
         log.info("UI main function finished.")
 
     except ImportError:
         log.warning("UI module 'app.py' not found.")
         log.info("Backend monitoring running in background. Press Ctrl+C to stop.")
-        # Keep main thread alive while backend runs
         try:
             while backend_thread.is_alive():
                 time.sleep(0.5)  # Check periodically, allows Ctrl+C
         except KeyboardInterrupt:
-            log.info("\nCtrl+C detected in main loop. Signaling backend.")
-            # How to signal backend thread? Need a shared flag or event.
-            # For now, daemon thread will just exit abruptly.
-            return 130
+            log.info("\nCtrl+C detected in main loop.")
+            exit_code = 130
         except Exception as e:
             log.exception(f"Error while waiting for backend thread: {e}")
-            return 1
-
+            exit_code = 1
     except Exception as e:
         log.exception(f"An unexpected error occurred launching or running the UI: {e}")
+        exit_code = 1
+    finally:
+        # Ensure backend thread is considered finished if main loop exits
         if backend_thread.is_alive():
-            log.info("UI crashed, waiting for backend thread to finish (or Ctrl+C)...")
-            try:
-                while backend_thread.is_alive():
-                    time.sleep(0.5)
-            except KeyboardInterrupt:
-                return 130
-            except Exception:
-                pass
-        return 1
+            log.info("Main thread exiting, backend daemon thread will terminate.")
+            # We don't explicitly stop the backend thread here, rely on daemon status
 
-    return 0  # Success if UI exits cleanly
+    return exit_code
 
 
 # --- Script Entry Point ---
@@ -225,4 +252,5 @@ def main(argv: Optional[List[str]] = None) -> int:
 if __name__ == "__main__":
     # Ensure necessary modules are importable from current dir or PYTHONPATH
     # e.g., monitor.py, strace.py, strace_cmd.py, versioned.py
+    # Assumes running from project root or installed package
     sys.exit(main())
