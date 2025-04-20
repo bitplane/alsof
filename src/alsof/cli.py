@@ -1,51 +1,42 @@
 #!/usr/bin/env python3
-
-# Filename: cli.py
-
 import argparse
 import logging
 import os
 import shlex
 import sys
 import threading
-import time
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from collections import deque
+from typing import Callable, List, Optional, Union
 
-from alsof import strace  # Import the adapter module
-from alsof import app
+from alsof import app, strace
 from alsof.monitor import Monitor
 
-# --- Setup Logging ---
+
+class TextualLogHandler(logging.Handler):
+    """A logging handler that puts messages into a deque."""
+
+    def __init__(self, log_queue: deque):
+        super().__init__()
+        self.log_queue = log_queue
+
+    def emit(self, record: logging.LogRecord):
+        """Emit a record."""
+        try:
+            msg = self.format(record)
+            self.log_queue.append(msg)
+        except Exception:
+            self.handleError(record)
+
+
+# Basic config will be overridden by setup later if log level arg is used
 logging.basicConfig(
-    level=os.environ.get("LOGLEVEL", "WARNING").upper(),
-    format="%(levelname)s:%(name)s:%(message)s",
-)
-# Use package-aware logger name
+    level=os.environ.get("LOGLEVEL", "WARNING").upper(), format="%(name)s: %(message)s"
+)  # Simplified format for app log
 log = logging.getLogger("alsof.cli")
 
-# --- Backend Registry ---
-AttachFuncType = Callable[[List[int], Monitor], None]
-RunFuncType = Callable[[List[str], Monitor], None]
-BackendTuple = Tuple[AttachFuncType, RunFuncType]
+BACKENDS = {"strace": (strace.attach, strace.run)}
 
-BACKENDS: Dict[str, BackendTuple] = {}
-if (
-    hasattr(strace, "attach")
-    and callable(strace.attach)
-    and hasattr(strace, "run")
-    and callable(strace.run)
-):
-    BACKENDS["strace"] = (strace.attach, strace.run)
-    log.info("Registered strace backend.")
-else:
-    # This log might not appear if basicConfig level is WARNING
-    log.warning(
-        "Could not register strace backend (missing or non-callable attach/run functions)."
-    )
-
-DEFAULT_BACKEND = next(iter(BACKENDS.keys())) if BACKENDS else None
-
-# --- Backend Execution Thread ---
+DEFAULT_BACKEND = list(BACKENDS)[0]
 
 
 def _run_backend_thread(
@@ -54,26 +45,13 @@ def _run_backend_thread(
     target_args: Union[List[str], List[int]],
 ):
     """Target function to run the selected backend in a thread."""
-    # Setup logging within the thread if necessary, or rely on root config
-    thread_log = logging.getLogger(f"{__name__}.backend")
+    thread_log = logging.getLogger(f"alsof.backend.{backend_func.__name__}")
     try:
-        thread_log.info(
-            f"Starting backend function {backend_func.__name__} in background thread..."
-        )
-        # We assume the backend function (run or attach) handles its own exceptions
-        # and logging, and blocks until monitoring stops or fails.
-        backend_func(
-            target_args, monitor_instance
-        )  # Call the actual run/attach function
-        thread_log.info(f"Backend function {backend_func.__name__} finished.")
+        thread_log.info("Starting backend function in background thread...")
+        backend_func(target_args, monitor_instance)
+        thread_log.info("Backend function finished.")
     except Exception as e:
-        # Log any unexpected errors from the backend function itself
-        thread_log.exception(
-            f"Unexpected error in backend thread {backend_func.__name__}: {e}"
-        )
-
-
-# --- Main Execution Function ---
+        thread_log.exception(f"Unexpected error in backend thread: {e}")
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -81,27 +59,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     Parses command line arguments, starts the selected backend in a thread,
     and attempts to launch the UI.
     """
-    # Configure root logger level based on default or env var initially
-    initial_log_level = os.environ.get("LOGLEVEL", "INFO").upper()
-    if initial_log_level not in ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]:
-        initial_log_level = "INFO"
-    # Use basicConfig defaults, but ensure level is set.
-    # Note: Subsequent calls to basicConfig might not reconfigure if handlers exist.
-    # Consider using logging.getLogger().setLevel() after parsing args instead.
-    logging.basicConfig(
-        level=initial_log_level, format="%(asctime)s %(levelname)s:%(name)s:%(message)s"
-    )
-    log.info(f"Initial log level set to {initial_log_level}")  # Use module logger
-
-    if not BACKENDS or DEFAULT_BACKEND is None:
-        log.critical("No monitoring backends available!")
-        return 1
-
     parser = argparse.ArgumentParser(
         description="Monitors file access for a command or process.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"Available backends: {', '.join(BACKENDS.keys())}\n"
-        "Example: alsof -b strace -- find . -maxdepth 1",  # Updated example
+        "Example: alsof -b strace -- find . -maxdepth 1",
     )
     parser.add_argument(
         "-b",
@@ -112,10 +74,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument(
         "--log",
-        default="INFO",  # Default to INFO when run from CLI
+        default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Set the logging level (default: INFO)",
     )
+    # Log file argument - consider adding later if needed
+    # parser.add_argument('--log-file', default=None, help='Redirect logs to a file.')
 
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument(
@@ -135,33 +99,53 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     args = parser.parse_args(argv)
 
-    # Reconfigure root logger level based on args NOW
-    logging.getLogger().setLevel(args.log.upper())
-    log.info(f"Log level set to {args.log.upper()}")  # Use module logger
+    # --- Setup Logging Handler ---
+    log_level = args.log.upper()
+    log_queue = deque(maxlen=1000)  # Max 1000 lines in memory
+
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+
+    # Remove existing handlers (like default StreamHandler) to avoid duplicate console output
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+
+    # Add our custom handler
+    textual_handler = TextualLogHandler(log_queue)
+    # Optional: Add a formatter if desired, otherwise uses root logger's effective format
+    # formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    # textual_handler.setFormatter(formatter)
+    root_logger.addHandler(textual_handler)
+
+    # Optional: Add a handler just for stderr/file if needed *in addition* to Textual
+    # console_handler = logging.StreamHandler(sys.stderr)
+    # console_handler.setLevel(log_level)
+    # console_formatter = logging.Formatter('%(asctime)s %(levelname)s:%(name)s:%(message)s')
+    # console_handler.setFormatter(console_formatter)
+    # root_logger.addHandler(console_handler)
+
+    log.info(f"Log level set to {log_level}. Logging to Textual UI via queue.")
 
     # --- Setup Monitoring ---
     target_command: Optional[List[str]] = None
     attach_ids: Optional[List[int]] = None
     monitor_id = "monitor_session"
-    backend_attach_func: Optional[AttachFuncType] = None
-    backend_run_func: Optional[RunFuncType] = None
+    backend_attach_func: Optional[Callable] = None
+    backend_run_func: Optional[Callable] = None
     backend_target_args: Optional[Union[List[str], List[int]]] = None
 
     selected_backend_funcs = BACKENDS.get(args.backend)
     if not selected_backend_funcs:
-        # This case should be prevented by argparse choices, but check anyway
-        log.critical(f"Selected backend '{args.backend}' not found in BACKENDS dict.")
+        log.critical(f"Selected backend '{args.backend}' not found.")
         return 1
     backend_attach_func, backend_run_func = selected_backend_funcs
 
     if args.command:
-        # REMAINDER captures everything after the known args,
-        # need to ensure it doesn't capture flags meant for argparse if -c isn't last.
-        # This simple check assumes -c IS last or only flags before it are --log/--backend
         if not args.command:
             parser.error("argument -c/--command: expected one or more arguments")
         target_command = args.command
-        monitor_id = shlex.join(target_command)  # Create ID from command
+        monitor_id = shlex.join(target_command)
         backend_func_to_run = backend_run_func
         backend_target_args = target_command
         log.info(f"Mode: Run Command. Target: {monitor_id}")
@@ -172,17 +156,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         backend_target_args = attach_ids
         log.info(f"Mode: Attach PIDs. Target: {monitor_id}")
     else:
-        # Should be caught by argparse group 'required=True'
         log.critical("Internal error: No command or PIDs specified.")
         return 1
 
-    # Check permissions only if using strace backend
     if os.geteuid() != 0 and args.backend == "strace":
-        log.warning(
-            "Running strace backend without root. strace/psutil may fail or lack permissions."
-        )
+        log.warning("Running strace backend without root. Permissions errors likely.")
 
-    # Create the Monitor instance
     monitor = Monitor(identifier=monitor_id)
 
     # --- Start Backend Thread ---
@@ -209,24 +188,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     exit_code = 0
     try:
         log.info("Launching app.main()...")
-        app.main(monitor=monitor)
+        # Pass the monitor instance AND the log queue to the app
+        app.main(monitor=monitor, log_queue=log_queue)
         log.info("UI main function finished.")
+
     except Exception as e:
-        log.exception(f"An unexpected error occurred launching or running the UI: {e}")
+        # Log critical UI errors to stderr since Textual might be down
+        print(f"FATAL UI ERROR: {e}", file=sys.stderr)
+        logging.exception(
+            f"An unexpected error occurred launching or running the UI: {e}"
+        )
         exit_code = 1
     finally:
-        # Ensure backend thread is considered finished if main loop exits
         if backend_thread.is_alive():
             log.info("Main thread exiting, backend daemon thread will terminate.")
-            # We don't explicitly stop the backend thread here, rely on daemon status
 
     return exit_code
 
 
-# --- Script Entry Point ---
-
 if __name__ == "__main__":
-    # Ensure necessary modules are importable from current dir or PYTHONPATH
-    # e.g., monitor.py, strace.py, strace_cmd.py, versioned.py
-    # Assumes running from project root or installed package
     sys.exit(main())

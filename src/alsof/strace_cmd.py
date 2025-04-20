@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
-from typing import Dict, Iterator, List, Optional  # Removed Any, sys, argparse
+from typing import Dict, Iterator, List, Optional
 
 import psutil  # For initial PID lookup
 
@@ -125,7 +125,6 @@ def _parse_args_state_machine(args_str: str) -> List[str]:
 
 def _parse_result_int(result_str: str) -> Optional[int]:
     """Parses strace result string (dec/hex) into an integer."""
-    # Simple internal helper for PID/TID mapping
     if not result_str:
         return None
     try:
@@ -145,9 +144,8 @@ def temporary_fifo() -> Iterator[str]:
     fifo_path = None
     temp_dir = None
     try:
-        # TemporaryDirectory cleans itself up on context exit
         with tempfile.TemporaryDirectory(prefix="strace_fifo_") as temp_dir_path:
-            temp_dir = temp_dir_path  # Store path for logging
+            temp_dir = temp_dir_path
             fifo_path = os.path.join(temp_dir, "strace_output.fifo")
             os.mkfifo(fifo_path)
             log.info(f"Created FIFO: {fifo_path}")
@@ -157,7 +155,6 @@ def temporary_fifo() -> Iterator[str]:
     except Exception as e:
         raise RuntimeError(f"Failed to set up temporary directory/FIFO: {e}") from e
     finally:
-        # Cleanup is handled by TemporaryDirectory context manager
         if fifo_path:
             log.info(f"FIFO {fifo_path} will be cleaned up.")
 
@@ -205,7 +202,7 @@ def stream_strace_output(
             proc = subprocess.Popen(
                 strace_command,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,  # Capture strace's own errors
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -213,7 +210,6 @@ def stream_strace_output(
 
             log.info(f"Opening FIFO {fifo_path} for reading...")
             try:
-                # Blocking open waits for strace to open it for writing
                 fifo_reader = open(fifo_path, "r", encoding="utf-8", errors="replace")
                 log.info("FIFO opened. Reading stream...")
             except Exception as e:
@@ -229,8 +225,6 @@ def stream_strace_output(
                 else:
                     raise RuntimeError(f"Failed to open FIFO for reading: {e}") from e
 
-            # Check for quick exit after FIFO open attempt
-            # Give strace a moment to potentially error out
             time.sleep(0.1)
             proc_exit_code = proc.poll()
             if proc_exit_code is not None:
@@ -241,20 +235,16 @@ def stream_strace_output(
                 log.warning(
                     f"Strace process exited quickly (code {proc_exit_code}). Target command/attach issue?{stderr_msg}"
                 )
-                # Don't raise here, might still be data in FIFO
 
             if fifo_reader:
                 for line in fifo_reader:
-                    yield line.rstrip("\n")  # Yield raw line
+                    yield line.rstrip("\n")
                 log.info("End of FIFO stream reached.")
                 fifo_reader.close()
                 fifo_reader = None
             else:
-                log.warning(
-                    "No FIFO reader available or stream was empty (process might have exited quickly)."
-                )
+                log.warning("No FIFO reader available or stream was empty.")
 
-            # Wait for process completion and check stderr
             stderr_output = ""
             if proc.stderr:
                 stderr_output = proc.stderr.read()
@@ -262,16 +252,17 @@ def stream_strace_output(
             if stderr_output.strip():
                 log.warning(f"Strace stderr output:\n{stderr_output.strip()}")
 
-            exit_code = proc.wait()  # Wait for strace process termination
+            exit_code = proc.wait()
             log.info(f"Strace process exited with code {exit_code}.")
 
     except FileNotFoundError:
         cmd_name = target_command[0] if target_command else "attach target"
         log.error(f"Command not found. Check 'strace' and '{shlex.quote(cmd_name)}'.")
         raise
+    # --- FIX: Re-raise critical exceptions after logging ---
     except Exception as e:
         log.exception(f"An error occurred during strace execution: {e}")
-        # Don't re-raise here, allow finally block to run
+        raise  # Re-raise the exception so it's not swallowed
     finally:
         log.info("Cleaning up stream_strace_output...")
         if proc and proc.poll() is None:
@@ -285,12 +276,11 @@ def stream_strace_output(
                 log.warning("Process did not terminate gracefully, killing...")
                 proc.kill()
             log.info("Strace process terminated on cleanup.")
-        if fifo_reader:  # Should be None if closed normally
+        if fifo_reader:
             try:
                 fifo_reader.close()
             except Exception:
                 pass
-        # FIFO path and temp dir cleanup handled by context manager exit
 
 
 # --- Generator: Parsing the Stream ---
@@ -313,17 +303,15 @@ def parse_strace_stream(
     log.info("Starting parse_strace_stream...")
     tid_to_pid_map: Dict[int, int] = {}
 
-    # --- Pre-populate map if attaching ---
     if attach_ids:
         log.info(f"Pre-populating TID->PID map for attach IDs: {attach_ids}")
         for initial_tid in attach_ids:
             try:
-                # Check existence first to avoid warnings on expected missing TIDs
                 if not psutil.pid_exists(initial_tid):
                     log.warning(f"Initial TID {initial_tid} does not exist. Skipping.")
                     continue
                 proc_info = psutil.Process(initial_tid)
-                pid = proc_info.pid  # Get TGID
+                pid = proc_info.pid
                 tid_to_pid_map[initial_tid] = pid
                 log.debug(f"Mapped initial TID {initial_tid} to PID {pid}")
             except psutil.NoSuchProcess:
@@ -337,76 +325,65 @@ def parse_strace_stream(
             except Exception as e:
                 log.error(f"Error getting PID for initial TID {initial_tid}: {e}")
 
-    # --- Process Stream ---
-    # Ensure process creation syscalls are traced for mapping
     combined_syscalls = sorted(list(set(syscalls) | set(PROCESS_SYSCALLS)))
 
-    for line in stream_strace_output(target_command, attach_ids, combined_syscalls):
-        timestamp = time.time()
-        match = STRACE_LINE_RE.match(line.strip())
-        if not match:
-            log.debug(f"Unmatched strace line: {line.strip()}")
-            continue  # Skip unmatched lines
+    # Wrap the stream_strace_output call in a try/except to catch errors from it
+    try:
+        for line in stream_strace_output(target_command, attach_ids, combined_syscalls):
+            timestamp = time.time()
+            match = STRACE_LINE_RE.match(line.strip())
+            if not match:
+                log.debug(f"Unmatched strace line: {line.strip()}")
+                continue
 
-        data = match.groupdict()
-        try:
-            tid = int(data["tid"])
-            syscall = data["syscall"]
-            args_str = data["args"]
-            result_str = data["result"]
-            error_name = data.get("error")
-            error_msg = data.get("errmsg")
-            success = error_name is None  # Determine success early
+            data = match.groupdict()
+            try:
+                tid = int(data["tid"])
+                syscall = data["syscall"]
+                args_str = data["args"]
+                result_str = data["result"]
+                error_name = data.get("error")
+                error_msg = data.get("errmsg")
+                success = error_name is None
 
-            # --- Lookup/Determine PID (TGID) ---
-            pid = tid_to_pid_map.get(tid)
-            if pid is None:
-                # If TID not in map, assume it's a main thread (TID=PID)
-                # or we missed its creation (attach mode to non-main thread?)
-                # We could try psutil lookup here, but it's slow per-event.
-                # Defaulting TID=PID is usually correct for the initial process
-                # and clone/fork handling should catch descendants.
-                pid = tid
-                tid_to_pid_map[tid] = pid
-                log.debug(f"TID {tid} not in map, assuming PID=TID.")
-            # --- End PID Lookup ---
+                pid = tid_to_pid_map.get(tid)
+                if pid is None:
+                    pid = tid
+                    tid_to_pid_map[tid] = pid
+                    log.debug(f"TID {tid} not in map, assuming PID=TID.")
 
-            # Parse arguments using state machine
-            parsed_args_list = _parse_args_state_machine(args_str)
+                parsed_args_list = _parse_args_state_machine(args_str)
 
-            # --- Update map on clone/fork success ---
-            if syscall in PROCESS_SYSCALLS and success:
-                try:
-                    result_code = _parse_result_int(result_str)
-                    if (
-                        result_code is not None and result_code > 0
-                    ):  # Parent context receiving child ID
-                        new_id = result_code
-                        if new_id not in tid_to_pid_map:
-                            tid_to_pid_map[new_id] = (
-                                pid  # Map new TID/PID to parent's PID (TGID)
-                            )
-                            log.info(
-                                f"Syscall {syscall}: Mapped new TID/PID {new_id} to parent PID {pid}"
-                            )
-                except Exception as map_e:
-                    log.error(f"Error updating TID map for {syscall}: {map_e}")
-            # --- End Map Update ---
+                if syscall in PROCESS_SYSCALLS and success:
+                    try:
+                        result_code = _parse_result_int(result_str)
+                        if result_code is not None and result_code > 0:
+                            new_id = result_code
+                            if new_id not in tid_to_pid_map:
+                                tid_to_pid_map[new_id] = pid
+                                log.info(
+                                    f"Syscall {syscall}: Mapped new TID/PID {new_id} to parent PID {pid}"
+                                )
+                    except Exception as map_e:
+                        log.error(f"Error updating TID map for {syscall}: {map_e}")
 
-            yield Syscall(
-                timestamp=timestamp,
-                tid=tid,
-                pid=pid,  # Resolved PID (TGID)
-                syscall=syscall,
-                args=parsed_args_list,
-                result_str=result_str,
-                error_name=error_name,
-                error_msg=error_msg,
-            )
-        except Exception as parse_exc:
-            log.error(f"Error parsing matched line: {line.strip()} -> {parse_exc}")
+                yield Syscall(
+                    timestamp=timestamp,
+                    tid=tid,
+                    pid=pid,
+                    syscall=syscall,
+                    args=parsed_args_list,
+                    result_str=result_str,
+                    error_name=error_name,
+                    error_msg=error_msg,
+                )
+            except Exception as parse_exc:
+                log.error(f"Error parsing matched line: {line.strip()} -> {parse_exc}")
+                # Continue parsing other lines if one fails
 
-
-# --- Main function and entry point removed ---
-# This module is now intended only for import.
-# Testing should be done via strace.py or dedicated test files.
+    except Exception as stream_exc:
+        # Log errors from the underlying stream_strace_output generator
+        log.exception(f"Error occurred in the strace stream: {stream_exc}")
+        # Decide whether to raise or just stop yielding
+        # Raising is probably better to signal the failure upstream
+        raise

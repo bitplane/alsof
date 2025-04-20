@@ -2,7 +2,7 @@
 
 import argparse
 import logging
-import os
+import os  # Needed for path operations
 import shlex
 import sys
 from typing import (  # Added missing imports
@@ -17,7 +17,6 @@ from typing import (  # Added missing imports
 import psutil
 
 # Modules from our package
-# Assumes monitor.py, strace_cmd.py, versioned.py are importable
 from alsof.monitor import Monitor
 from alsof.strace_cmd import (
     DEFAULT_SYSCALLS,
@@ -41,7 +40,7 @@ def _parse_result(result_str: str) -> Optional[int]:
     if not result_str:
         return None
     try:
-        return int(result_str, 0)  # Use base 0 to auto-detect hex/dec/oct
+        return int(result_str, 0)
     except ValueError:
         log.warning(f"Could not parse result string: '{result_str}'")
         return None
@@ -52,13 +51,30 @@ def _clean_path_arg(path_arg: Any) -> Optional[str]:
     if not isinstance(path_arg, str) or not path_arg:
         return None
     path = path_arg
-    # Remove surrounding quotes if present
     if len(path) >= 2 and path.startswith('"') and path.endswith('"'):
         try:
-            # Decode common escapes
             path = path[1:-1].encode("utf-8").decode("unicode_escape")
         except Exception:
-            path = path[1:-1]  # Use raw content if unescaping fails
+            path = path[1:-1]
+    return path
+
+
+def _resolve_path(path: Optional[str]) -> Optional[str]:
+    """Converts a potentially relative path to absolute."""
+    if path is None:
+        return None
+    # Avoid resolving placeholders like <STDIN>
+    if path.startswith("<") and path.endswith(">"):
+        return path
+    if not os.path.isabs(path):
+        try:
+            # Resolve relative to alsof's CWD. Limitation: might not match traced process CWD.
+            abs_path = os.path.abspath(path)
+            log.debug(f"Resolved relative path '{path}' to '{abs_path}'")
+            return abs_path
+        except OSError as e:
+            log.warning(f"Could not resolve path '{path}': {e}")
+            return path  # Return original path on error
     return path
 
 
@@ -68,43 +84,32 @@ def _clean_path_arg(path_arg: Any) -> Optional[str]:
 def _process_syscall_event(
     event: Syscall, monitor: Monitor, tid_to_pid_map: Dict[int, int]
 ):
-    """
-    Processes a single Syscall event, updates the tid->pid map,
-    resolves paths, and calls the appropriate method on the Monitor object.
-    """
-    tid = event.tid  # TID from strace line
+    """Processes a single Syscall event."""
+    tid = event.tid
     syscall_name = event.syscall
-    args = event.args  # List[str] of raw args from state machine parser
+    args = event.args
     result_str = event.result_str
     error_name = event.error_name
     timestamp = event.timestamp
 
     path: Optional[str] = None
+    old_path: Optional[str] = None  # For rename
+    new_path: Optional[str] = None  # For rename
     fd: Optional[int] = None
     details: Dict[str, Any] = {}
     success = error_name is None
     result_code = _parse_result(result_str)
 
-    # --- Determine PID (TGID) ---
     pid = tid_to_pid_map.get(tid)
     if pid is None:
-        # If TID not in map, assume it's a main thread (TID=PID)
-        # or we missed its creation (attach mode to non-main thread?)
-        # Defaulting TID=PID is usually correct for the initial process
-        # and clone/fork handling should catch descendants.
         pid = tid
         tid_to_pid_map[tid] = pid
         log.debug(f"TID {tid} not in map, assuming PID=TID.")
-        # TODO: Consider optional psutil lookup here if robustness is critical
-    # --- End PID Lookup ---
 
-    # --- Update map on clone/fork success ---
-    # Needs to happen *before* calling handlers
     if syscall_name in PROCESS_SYSCALLS and success:
         try:
             new_id = result_code
-            if new_id is not None and new_id > 0:  # Parent context receiving child ID
-                # Map the new child TID/PID to the *current* process's PID (TGID)
+            if new_id is not None and new_id > 0:
                 if new_id not in tid_to_pid_map:
                     tid_to_pid_map[new_id] = pid
                     log.info(
@@ -112,27 +117,24 @@ def _process_syscall_event(
                     )
         except Exception as map_e:
             log.error(f"Error updating TID map for {syscall_name}: {map_e}")
-    # --- End Map Update ---
 
-    # --- Extract Path/FD and Call Monitor Handler ---
     try:
-        # Prepare details dict
         if not success and error_name:
             details["error_name"] = error_name
         if (
             syscall_name in ["read", "pread64", "readv", "write", "pwrite64", "writev"]
             and success
             and result_code is not None
+            and result_code >= 0
         ):
-            if result_code >= 0:
-                details["bytes"] = result_code
+            details["bytes"] = result_code
 
-        # --- Map syscall to Monitor method ---
         handler_method = None
         handler_args: Tuple = ()
 
+        # --- Syscall to Handler Mapping ---
         if syscall_name in ["open", "creat"]:
-            path = _clean_path_arg(args[0] if len(args) > 0 else None)
+            path = _resolve_path(_clean_path_arg(args[0] if args else None))
             if path is not None and result_code is not None:
                 fd = result_code if success else -1
                 handler_method = monitor.open
@@ -143,7 +145,7 @@ def _process_syscall_event(
                 )
 
         elif syscall_name == "openat":
-            path = _clean_path_arg(args[1] if len(args) > 1 else None)
+            path = _resolve_path(_clean_path_arg(args[1] if len(args) > 1 else None))
             if path is not None and result_code is not None:
                 fd = result_code if success else -1
                 handler_method = monitor.open
@@ -152,27 +154,27 @@ def _process_syscall_event(
                 log.warning(f"Skipping openat event, missing path or result: {event!r}")
 
         elif syscall_name in ["read", "pread64", "readv"]:
-            if len(args) > 0:
+            if args:
                 fd = _parse_result(str(args[0]))
             if fd is not None:
-                path = monitor.get_path(pid, fd)  # Resolve path using monitor's cache
+                path = monitor.get_path(pid, fd)  # Path resolved by monitor
                 handler_method = monitor.read
                 handler_args = (pid, fd, path, success, timestamp)
             else:
                 log.warning(f"Skipping read event, missing fd: {event!r}")
 
         elif syscall_name in ["write", "pwrite64", "writev"]:
-            if len(args) > 0:
+            if args:
                 fd = _parse_result(str(args[0]))
             if fd is not None:
-                path = monitor.get_path(pid, fd)  # Resolve path using monitor's cache
+                path = monitor.get_path(pid, fd)  # Path resolved by monitor
                 handler_method = monitor.write
                 handler_args = (pid, fd, path, success, timestamp)
             else:
                 log.warning(f"Skipping write event, missing fd: {event!r}")
 
         elif syscall_name == "close":
-            if len(args) > 0:
+            if args:
                 fd = _parse_result(str(args[0]))
             if fd is not None:
                 handler_method = monitor.close
@@ -181,7 +183,7 @@ def _process_syscall_event(
                 log.warning(f"Skipping close event, missing fd: {event!r}")
 
         elif syscall_name in ["access", "stat", "lstat"]:
-            path = _clean_path_arg(args[0] if len(args) > 0 else None)
+            path = _resolve_path(_clean_path_arg(args[0] if args else None))
             if path is not None:
                 handler_method = monitor.stat
                 handler_args = (pid, path, success, timestamp)
@@ -189,7 +191,7 @@ def _process_syscall_event(
                 log.warning(f"Skipping {syscall_name} event, missing path: {event!r}")
 
         elif syscall_name == "newfstatat":
-            path = _clean_path_arg(args[1] if len(args) > 1 else None)
+            path = _resolve_path(_clean_path_arg(args[1] if len(args) > 1 else None))
             if path is not None:
                 handler_method = monitor.stat
                 handler_args = (pid, path, success, timestamp)
@@ -197,7 +199,7 @@ def _process_syscall_event(
                 log.warning(f"Skipping newfstatat event, missing path: {event!r}")
 
         elif syscall_name in ["unlink"]:
-            path = _clean_path_arg(args[0] if len(args) > 0 else None)
+            path = _resolve_path(_clean_path_arg(args[0] if args else None))
             if path is not None:
                 handler_method = monitor.delete
                 handler_args = (pid, path, success, timestamp)
@@ -205,7 +207,7 @@ def _process_syscall_event(
                 log.warning(f"Skipping unlink event, missing path: {event!r}")
 
         elif syscall_name == "unlinkat":
-            path = _clean_path_arg(args[1] if len(args) > 1 else None)
+            path = _resolve_path(_clean_path_arg(args[1] if len(args) > 1 else None))
             if path is not None:
                 handler_method = monitor.delete
                 handler_args = (pid, path, success, timestamp)
@@ -213,8 +215,10 @@ def _process_syscall_event(
                 log.warning(f"Skipping unlinkat event, missing path: {event!r}")
 
         elif syscall_name in ["rename"]:
-            old_path = _clean_path_arg(args[0] if len(args) > 0 else None)
-            new_path = _clean_path_arg(args[1] if len(args) > 1 else None)
+            old_path = _resolve_path(_clean_path_arg(args[0] if args else None))
+            new_path = _resolve_path(
+                _clean_path_arg(args[1] if len(args) > 1 else None)
+            )
             if old_path and new_path:
                 handler_method = monitor.rename
                 handler_args = (pid, old_path, new_path, success, timestamp)
@@ -222,15 +226,19 @@ def _process_syscall_event(
                 log.warning(f"Skipping rename event, missing paths: {event!r}")
 
         elif syscall_name in ["renameat"]:
-            old_path = _clean_path_arg(args[1] if len(args) > 1 else None)
-            new_path = _clean_path_arg(args[3] if len(args) > 3 else None)
+            old_path = _resolve_path(
+                _clean_path_arg(args[1] if len(args) > 1 else None)
+            )
+            new_path = _resolve_path(
+                _clean_path_arg(args[3] if len(args) > 3 else None)
+            )
             if old_path and new_path:
                 handler_method = monitor.rename
                 handler_args = (pid, old_path, new_path, success, timestamp)
             else:
                 log.warning(f"Skipping renameat event, missing paths: {event!r}")
 
-        # Call the handler if found
+        # --- Call Handler ---
         if handler_method:
             handler_method(*handler_args, **details)
         elif syscall_name not in PROCESS_SYSCALLS:
@@ -251,92 +259,69 @@ RunFuncType = Callable[[List[str], Monitor], None]
 def attach(
     pids_or_tids: List[int], monitor: Monitor, syscalls: List[str] = DEFAULT_SYSCALLS
 ):
-    """
-    Attaches strace to existing PIDs/TIDs and processes events, updating the Monitor state.
-    """
+    """Attaches strace to existing PIDs/TIDs and processes events."""
     if not pids_or_tids:
         log.warning("attach called with no PIDs/TIDs.")
         return
-
     log.info(f"Attaching to PIDs/TIDs: {pids_or_tids}")
     tid_to_pid_map: Dict[int, int] = {}
-
-    # Pre-populate map using psutil
-    log.info(f"Pre-populating TID->PID map for attach IDs: {pids_or_tids}")
     initial_pids = set()
-    for initial_tid in pids_or_tids:
+    for tid in pids_or_tids:
         try:
-            if not psutil.pid_exists(initial_tid):
-                log.warning(f"Initial TID {initial_tid} does not exist. Skipping.")
-                continue
-            proc_info = psutil.Process(initial_tid)
-            pid = proc_info.pid  # Get TGID
-            tid_to_pid_map[initial_tid] = pid
-            initial_pids.add(pid)
-            log.debug(f"Mapped initial TID {initial_tid} to PID {pid}")
-        except psutil.NoSuchProcess:
-            log.warning(
-                f"Process/Thread with TID {initial_tid} disappeared during initial mapping."
-            )
-        except psutil.AccessDenied:
-            log.warning(
-                f"Access denied getting PID for initial TID {initial_tid}. Mapping might be incomplete."
-            )
+            if psutil.pid_exists(tid):
+                proc = psutil.Process(tid)
+                pid = proc.pid
+                tid_to_pid_map[tid] = pid
+                initial_pids.add(pid)
+                log.debug(f"Mapped initial TID {tid} to PID {pid}")
+            else:
+                log.warning(f"Initial TID {tid} does not exist. Skipping.")
         except Exception as e:
-            log.error(f"Error getting PID for initial TID {initial_tid}: {e}")
+            log.error(f"Error getting PID for initial TID {tid}: {e}")
 
     if not tid_to_pid_map:
-        log.error("Could not map any initial TIDs to PIDs. Aborting attach.")
+        log.error("Could not map any initial TIDs. Aborting.")
         return
-
-    log.info(
-        f"Starting event processing loop for attached PIDs/TIDs (maps to PIDs: {list(initial_pids)})..."
-    )
+    log.info(f"Starting attach loop (maps to PIDs: {list(initial_pids)})...")
     try:
-        # Ensure process syscalls are traced for TID->PID mapping
         combined_syscalls = sorted(list(set(syscalls) | set(PROCESS_SYSCALLS)))
-        for syscall_event in parse_strace_stream(
+        for event in parse_strace_stream(
             attach_ids=pids_or_tids, syscalls=combined_syscalls
         ):
-            _process_syscall_event(syscall_event, monitor, tid_to_pid_map)
+            _process_syscall_event(event, monitor, tid_to_pid_map)
     except KeyboardInterrupt:
-        log.info("Attach interrupted by user.")
+        log.info("Attach interrupted.")
     except Exception as e:
-        log.exception(f"Error during attach event processing: {e}")
+        log.exception(f"Error during attach: {e}")
     finally:
-        log.info("Attach processing finished.")
+        log.info("Attach finished.")
 
 
 def run(command: List[str], monitor: Monitor, syscalls: List[str] = DEFAULT_SYSCALLS):
-    """
-    Launches a command via strace and processes events, updating the Monitor state.
-    """
+    """Launches a command via strace and processes events."""
     if not command:
         log.error("run called with empty command.")
         return
-
     log.info(f"Running command: {' '.join(shlex.quote(c) for c in command)}")
-    tid_to_pid_map: Dict[int, int] = {}  # Starts empty, populated by clone/fork
-
-    log.info("Starting event processing loop for launched command...")
+    tid_to_pid_map: Dict[int, int] = {}
+    log.info("Starting run loop...")
     try:
-        # Ensure process syscalls are traced for TID->PID mapping
         combined_syscalls = sorted(list(set(syscalls) | set(PROCESS_SYSCALLS)))
-        for syscall_event in parse_strace_stream(
+        for event in parse_strace_stream(
             target_command=command, syscalls=combined_syscalls
         ):
-            _process_syscall_event(syscall_event, monitor, tid_to_pid_map)
+            _process_syscall_event(event, monitor, tid_to_pid_map)
     except KeyboardInterrupt:
-        log.info("Run interrupted by user.")
+        log.info("Run interrupted.")
     except Exception as e:
-        log.exception(f"Error during run event processing: {e}")
+        log.exception(f"Error during run: {e}")
     finally:
-        log.info("Run processing finished.")
+        log.info("Run finished.")
 
 
 # --- Main Execution Function (for testing adapter) ---
+# (Keep main for testing)
 def main(argv: Optional[List[str]] = None) -> int:
-    # Keep main for testing the adapter directly if needed
     log_level = os.environ.get("LOGLEVEL", "INFO").upper()
     if log_level not in ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]:
         log_level = "INFO"
@@ -349,9 +334,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         description="Strace adapter (Test): runs/attaches strace and updates Monitor state.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Examples:\n"
-        "  # Assumes monitor.py and strace_cmd.py are importable\n"
-        "  python3 %(prog)s -c find . -maxdepth 1\n"
-        "  sudo python3 %(prog)s -p 1234",
+        "  python3 -m alsof.strace -c find . -maxdepth 1\n"  # Updated example command
+        "  sudo python3 -m alsof.strace -p 1234",
     )
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument(
@@ -426,5 +410,4 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    # This allows testing the adapter logic directly
     sys.exit(main())
