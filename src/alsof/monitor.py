@@ -7,12 +7,18 @@ from typing import Any, Deque, Dict, Iterator, Optional, Set
 
 from alsof.versioned import Versioned, changes, waits
 
+# --- Setup Logging ---
 logging.basicConfig(
     level=os.environ.get("LOGLEVEL", "WARNING").upper(),
     format="%(levelname)s:%(name)s:%(message)s",
 )
 log = logging.getLogger(__name__)
 
+# --- Constants ---
+STDIN_PATH = "<STDIN>"
+STDOUT_PATH = "<STDOUT>"
+STDERR_PATH = "<STDERR>"
+STD_PATHS = {STDIN_PATH, STDOUT_PATH, STDERR_PATH}
 
 # --- File State Information ---
 
@@ -62,14 +68,18 @@ class Monitor(Versioned):
 
     def _cache_info(self, path: str, timestamp: float) -> Optional[FileInfo]:
         """Gets existing FileInfo or creates a new one, checking ignore list."""
-        if path in self.ignored_paths:
+        # Early out if ignored or if it's a standard stream placeholder
+        if path in self.ignored_paths or path in STD_PATHS:
             log.debug(f"Ignoring event for path: {path}")
             return None
+
+        # Get or create
         if path not in self.files:
             log.debug(f"Creating new FileInfo for path: {path}")
             self.files[path] = FileInfo(
                 path=path, last_activity_ts=timestamp, status="accessed"
             )
+        # Always update timestamp on any interaction
         self.files[path].last_activity_ts = timestamp
         return self.files[path]
 
@@ -98,12 +108,14 @@ class Monitor(Versioned):
                 info.recent_event_types.append(event_type)
 
     # --- Public Handler Methods (Called by Backends/Adapters) ---
-    # NOTE: tid parameter removed from all handlers
 
     @changes
     def ignore(self, path: str):
         """Adds a path to the ignore list (in-memory only)."""
         if not isinstance(path, str) or not path:
+            return
+        # Don't ignore standard stream placeholders
+        if path in STD_PATHS:
             return
         if path in self.ignored_paths:
             return
@@ -134,7 +146,8 @@ class Monitor(Versioned):
     def ignore_all(self):
         """Adds all currently tracked file paths to the ignore list (in-memory only)."""
         log.info(f"Ignoring all currently tracked files for '{self.identifier}'")
-        ignores = list(self.files.keys())
+        # Exclude standard paths if they somehow got into self.files
+        ignores = [p for p in self.files.keys() if p not in STD_PATHS]
         count = 0
         for path in ignores:
             if path not in self.ignored_paths:
@@ -149,7 +162,7 @@ class Monitor(Versioned):
         log.debug(f"open: pid={pid}, path={path}, fd={fd}, success={success}")
         info = self._cache_info(path, timestamp)
         if not info:
-            return
+            return  # Path ignored or is std stream
 
         details_for_finalize = details.copy()
         self._finalize_update(info, "OPEN", success, timestamp, details_for_finalize)
@@ -178,10 +191,26 @@ class Monitor(Versioned):
     @changes
     def close(self, pid: int, fd: int, success: bool, timestamp: float, **details):
         log.debug(f"close: pid={pid}, fd={fd}, success={success}")
-        path = self.pid_fd_map.get(pid, {}).get(fd)
+        # Use get_path which now handles std streams
+        path = self.get_path(pid, fd)
 
         if not path:
             log.warning(f"Close event for unknown PID {pid} FD {fd}")
+            return
+        # Don't process close events for std streams further
+        if path in STD_PATHS:
+            log.debug(
+                f"Ignoring close event for standard stream: {path} (PID {pid} FD {fd})"
+            )
+            # Still remove from FD map if it somehow got there
+            if (
+                success
+                and pid in self.pid_fd_map
+                and fd in self.pid_fd_map.get(pid, {})
+            ):
+                del self.pid_fd_map[pid][fd]
+                if not self.pid_fd_map[pid]:
+                    del self.pid_fd_map[pid]
             return
 
         info = self.files.get(path)
@@ -189,7 +218,11 @@ class Monitor(Versioned):
             log.warning(
                 f"Close event for PID {pid} FD {fd} refers to path '{path}' not in state."
             )
-            if success and pid in self.pid_fd_map and fd in self.pid_fd_map[pid]:
+            if (
+                success
+                and pid in self.pid_fd_map
+                and fd in self.pid_fd_map.get(pid, {})
+            ):
                 del self.pid_fd_map[pid][fd]
                 if not self.pid_fd_map[pid]:
                     del self.pid_fd_map[pid]
@@ -206,7 +239,7 @@ class Monitor(Versioned):
             return
 
         # Success Case
-        if pid in self.pid_fd_map and fd in self.pid_fd_map[pid]:
+        if pid in self.pid_fd_map and fd in self.pid_fd_map.get(pid, {}):
             del self.pid_fd_map[pid][fd]
             log.debug(f"Removed mapping for PID {pid} FD {fd}")
             if not self.pid_fd_map[pid]:
@@ -242,6 +275,10 @@ class Monitor(Versioned):
         if not path:
             log.warning(f"Read event for PID {pid} FD {fd} could not resolve path.")
             return
+        # Don't track reads on std streams in detail
+        if path in STD_PATHS:
+            log.debug(f"Ignoring read event details for standard stream: {path}")
+            return
 
         info = self._cache_info(path, timestamp)
         if not info:
@@ -275,6 +312,10 @@ class Monitor(Versioned):
 
         if not path:
             log.warning(f"Write event for PID {pid} FD {fd} could not resolve path.")
+            return
+        # Don't track writes on std streams in detail
+        if path in STD_PATHS:
+            log.debug(f"Ignoring write event details for standard stream: {path}")
             return
 
         info = self._cache_info(path, timestamp)
@@ -322,7 +363,7 @@ class Monitor(Versioned):
 
         # Success Case
         info.status = "deleted"
-        # Clean up FD maps and FileInfo.open_by_pids
+        # Clean up FD maps and FileInfo.open_by_pids (logic unchanged)
         pids_to_check = list(self.pid_fd_map.keys())
         for check_pid in pids_to_check:
             if check_pid in info.open_by_pids:
@@ -374,14 +415,13 @@ class Monitor(Versioned):
         if new_path in self.ignored_paths:
             log.info(f"Rename target path '{new_path}' is ignored.")
             if success and old_path not in self.ignored_paths:
-                # Pass pid, path, success, timestamp, details
                 self.delete(
                     pid, old_path, True, timestamp, {"renamed_to_ignored": new_path}
                 )
             return
         if old_path in self.ignored_paths:
             log.warning(f"Rename source path '{old_path}' is ignored.")
-            if success:  # Pass pid, path, success, timestamp, details
+            if success:
                 self.stat(
                     pid, new_path, True, timestamp, {"renamed_from_ignored": old_path}
                 )
@@ -406,20 +446,17 @@ class Monitor(Versioned):
             log.debug(
                 f"Rename source path '{old_path}' not tracked. Treating as access to target."
             )
-            # Pass pid, path, success, timestamp, details
             self.stat(
                 pid, new_path, True, timestamp, {"renamed_from_unknown": old_path}
             )
             return
 
-        # Source *is* tracked
         log.info(f"Processing successful rename: '{old_path}' -> '{new_path}'")
         old_info.last_activity_ts = timestamp
 
         new_info = self._cache_info(new_path, timestamp)
         if not new_info:
             log.error(f"Could not get/create FileInfo for rename target '{new_path}'")
-            # Pass pid, path, success, timestamp, details
             self.delete(
                 pid,
                 old_path,
@@ -436,7 +473,6 @@ class Monitor(Versioned):
         new_info.open_by_pids = old_info.open_by_pids
         new_info.bytes_read = old_info.bytes_read
         new_info.bytes_written = old_info.bytes_written
-        # Finalize update for both
         details_for_old = {"renamed_to": new_path}
         details_for_new = {"renamed_from": old_path}
         self._finalize_update(old_info, "RENAME", success, timestamp, details_for_old)
@@ -456,7 +492,6 @@ class Monitor(Versioned):
                 for fd in fds_to_update:
                     self.pid_fd_map[update_pid][fd] = new_path
 
-        # Remove old path state from tracking
         log.debug(f"Removing old path state after successful rename: {old_path}")
         del self.files[old_path]
 
@@ -486,11 +521,24 @@ class Monitor(Versioned):
 
     @waits
     def get_path(self, pid: int, fd: int) -> Optional[str]:
-        """Gets the path associated with a PID/FD combination from cache."""
-        return self.pid_fd_map.get(pid, {}).get(fd)
+        """
+        Gets the path associated with a PID/FD combination from cache,
+        returning placeholders for std streams if not found.
+        """
+        path = self.pid_fd_map.get(pid, {}).get(fd)
+        if path is not None:
+            return path
+        # If not in cache, check for standard streams
+        if fd == 0:
+            return STDIN_PATH
+        if fd == 1:
+            return STDOUT_PATH
+        if fd == 2:
+            return STDERR_PATH
+        # Otherwise, path is unknown
+        return None
 
     # --- Helper for common state updates ---
-    # Note: This is called *within* the lock acquired by @changes handlers
     def _finalize_update(
         self,
         info: FileInfo,
