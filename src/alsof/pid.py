@@ -2,19 +2,23 @@
 
 # Filename: pid.py (suggested)
 
-import psutil
+import argparse
 import logging
 import os
 import sys
-import argparse
 from typing import List, Optional
+
+import psutil
 
 # --- Setup Logging ---
 # Configure basic logging; callers can override this configuration.
 # Set default level to WARNING to avoid spamming INFO messages when used as library.
-logging.basicConfig(level=os.environ.get("LOGLEVEL", "WARNING").upper(),
-                    format='%(levelname)s:%(name)s:%(message)s')
+logging.basicConfig(
+    level=os.environ.get("LOGLEVEL", "WARNING").upper(),
+    format="%(levelname)s:%(name)s:%(message)s",
+)
 log = logging.getLogger(__name__)
+
 
 # Renamed function from get_descendant_pids
 def get_descendants(parent_pid: int) -> List[int]:
@@ -45,14 +49,20 @@ def get_descendants(parent_pid: int) -> List[int]:
         log.warning(f"Process with PID {parent_pid} not found.")
     except psutil.AccessDenied:
         # Log warning, return empty list - permission issue
-        log.warning(f"Access denied when trying to get descendants of PID {parent_pid}.")
+        log.warning(
+            f"Access denied when trying to get descendants of PID {parent_pid}."
+        )
     except Exception as e:
         # Catch any other unexpected psutil errors
-        log.error(f"An unexpected error occurred getting descendants for PID {parent_pid}: {e}")
+        log.error(
+            f"An unexpected error occurred getting descendants for PID {parent_pid}: {e}"
+        )
 
     return descendant_pids
 
+
 # --- Main Execution Function ---
+
 
 def main(argv: Optional[List[str]] = None) -> int:
     """
@@ -60,21 +70,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     """
     parser = argparse.ArgumentParser(
         description="List all descendant PIDs (children, grandchildren, etc.) for a given parent PID.",
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument("pid", type=int, help="The PID of the parent process.")
     parser.add_argument(
-        "pid",
-        type=int,
-        help="The PID of the parent process."
-    )
-    parser.add_argument(
-        '--log',
-        default='WARNING',
-        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
-        help='Set the logging level (default: WARNING)'
+        "--log",
+        default="WARNING",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Set the logging level (default: WARNING)",
     )
 
-    args = parser.parse_args(argv) # Parses sys.argv[1:] if argv is None
+    args = parser.parse_args(argv)  # Parses sys.argv[1:] if argv is None
 
     # Configure logging level based on argument for standalone execution
     logging.getLogger().setLevel(args.log.upper())
@@ -87,12 +93,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         for pid in descendant_pids:
             print(pid)
 
-        return 0 # Success
+        return 0  # Success
 
     except Exception as e:
         # Catch any unexpected errors during execution
         log.critical(f"An unexpected error occurred in main: {e}", exc_info=True)
         return 1
+
 
 # --- Script Entry Point ---
 

@@ -8,7 +8,8 @@ authors = [
 readme = "README.md"
 
 dependencies = [
-    "psutil"
+    "psutil",
+    "textual"
 ]
 
 [project.optional-dependencies]
@@ -25,3 +26,7 @@ dev = [
 [build-system]
 build-backend = "flit_core.buildapi"
 requires = ["flit_core >=3.2,<4"]
+
+[tool.isort]
+profile = "black"
+

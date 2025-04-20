@@ -4,7 +4,6 @@ import argparse
 import contextlib
 import logging
 import os
-import psutil  # <-- Import psutil
 import re
 import shlex
 import shutil
@@ -12,8 +11,10 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass, field
-from typing import List, Iterator, Optional, Any, Dict
+from dataclasses import dataclass
+from typing import Dict, Iterator, List, Optional
+
+import psutil  # <-- Import psutil
 
 # --- Setup Logging ---
 logging.basicConfig(
@@ -211,7 +212,7 @@ def stream_strace_output(
                         f" Stderr: '{stderr_output[:500]}'." if stderr_output else ""
                     )
                     raise RuntimeError(
-                        f"Failed to open FIFO. Strace process exited early (code {proc_exit_code}).{stderr_msg} Error: {e}"
+                        f"Strace process exited (code {proc_exit_code}).{stderr_msg} Error: {e}"
                     ) from e
                 else:
                     raise RuntimeError(f"Failed to open FIFO for reading: {e}") from e
