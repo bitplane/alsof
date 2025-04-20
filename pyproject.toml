@@ -1,0 +1,27 @@
+[project]
+name = "alsof"
+description = "an interactive lsof alternative"
+version = "0.0.1"
+authors = [
+    { name = "Gareth Davidson", email = "gaz@bitplane.net" }
+]
+readme = "README.md"
+
+dependencies = [
+    "psutil"
+]
+
+[project.optional-dependencies]
+dev = [
+    "flake8",
+    "pre-commit",
+    "pytest",
+    "coverage",
+    "pytest-cov",
+    "build",
+    "twine"
+]
+
+[build-system]
+build-backend = "flit_core.buildapi"
+requires = ["flit_core >=3.2,<4"]
