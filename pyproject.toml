@@ -27,6 +27,9 @@ dev = [
 build-backend = "flit_core.buildapi"
 requires = ["flit_core >=3.2,<4"]
 
+[project.scripts]
+alsof = "alsof.cli:main"
+
 [tool.isort]
 profile = "black"
 
