@@ -1,4 +1,4 @@
-# `alsof` - list open files GUI
+# `alsof` - list open files TUI
 
 Gemini 2.5 Pro coding test: a TUI that lists open files for a given process.
 

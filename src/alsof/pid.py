@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 
-# Filename: pid.py (suggested)
+# Filename: pid.py
 
 import argparse
 import logging
 import os
 import sys
-from typing import List, Optional
 
 import psutil
 
 # --- Setup Logging ---
-# Configure basic logging; callers can override this configuration.
-# Set default level to WARNING to avoid spamming INFO messages when used as library.
 logging.basicConfig(
     level=os.environ.get("LOGLEVEL", "WARNING").upper(),
     format="%(levelname)s:%(name)s:%(message)s",
@@ -20,88 +17,126 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-# Renamed function from get_descendant_pids
-def get_descendants(parent_pid: int) -> List[int]:
+def get_descendants(parent_pid: int) -> list[int]:
     """
-    Retrieves a list of all descendant process IDs (PIDs) for a given parent PID
-    (children, grandchildren, etc.).
-
-    Uses the psutil library for cross-platform compatibility.
-
-    Args:
-        parent_pid: The Process ID of the parent process.
-
-    Returns:
-        A list of integer PIDs of the descendants.
-        Returns an empty list if the parent process is not found, has no descendants,
-        or if there's a permission error accessing the process.
+    Retrieves a list of all descendant process IDs (PIDs) for a given parent PID.
     """
-    descendant_pids: List[int] = []
+    descendant_pids: list[int] = []
     try:
         parent = psutil.Process(parent_pid)
-        # Use recursive=True to get all descendants
         descendant_procs = parent.children(recursive=True)
         descendant_pids = [proc.pid for proc in descendant_procs]
         log.debug(f"Found descendants for PID {parent_pid}: {descendant_pids}")
-
     except psutil.NoSuchProcess:
-        # Log warning, return empty list - expected if PID is gone
         log.warning(f"Process with PID {parent_pid} not found.")
     except psutil.AccessDenied:
-        # Log warning, return empty list - permission issue
-        log.warning(
-            f"Access denied when trying to get descendants of PID {parent_pid}."
-        )
+        log.warning(f"Access denied getting descendants of PID {parent_pid}.")
     except Exception as e:
-        # Catch any other unexpected psutil errors
-        log.error(
-            f"An unexpected error occurred getting descendants for PID {parent_pid}: {e}"
-        )
-
+        log.error(f"Unexpected error getting descendants for PID {parent_pid}: {e}")
     return descendant_pids
 
 
-# --- Main Execution Function ---
-
-
-def main(argv: Optional[List[str]] = None) -> int:
+def get_cwd(pid: int) -> str | None:
     """
-    Command-line entry point. Takes a PID and prints descendant PIDs.
+    Retrieves the Current Working Directory (CWD) for a given PID.
+
+    Uses psutil for cross-platform compatibility where possible, falling
+    back to /proc/<pid>/cwd on Linux if needed (though psutil usually handles this).
+
+    Args:
+        pid: The Process ID.
+
+    Returns:
+        The absolute path string of the CWD, or None if the process doesn't exist,
+        access is denied, or the CWD cannot be determined.
+    """
+    try:
+        proc = psutil.Process(pid)
+        cwd = proc.cwd()
+        log.debug(f"Retrieved CWD for PID {pid}: {cwd}")
+        return cwd
+    except psutil.NoSuchProcess:
+        log.warning(f"Process with PID {pid} not found when getting CWD.")
+        return None
+    except psutil.AccessDenied:
+        log.warning(f"Access denied getting CWD for PID {pid}.")
+        # Attempt Linux /proc fallback (might also fail with AccessDenied)
+        try:
+            # Ensure pid is integer before path join
+            proc_path = f"/proc/{int(pid)}/cwd"
+            if os.path.exists(proc_path):  # Check existence before readlink
+                cwd = os.readlink(proc_path)
+                log.debug(f"Retrieved CWD via /proc for PID {pid}: {cwd}")
+                return cwd
+            else:
+                log.warning(f"/proc path {proc_path} not found.")
+                return None
+        except (OSError, PermissionError) as e:
+            log.warning(f"Failed /proc fallback for CWD of PID {pid}: {e}")
+            return None
+        except Exception as e:  # Catch other potential errors
+            log.error(
+                f"Unexpected error during /proc fallback for CWD of PID {pid}: {e}"
+            )
+            return None
+    except Exception as e:
+        # Catch other potential psutil errors
+        log.error(f"An unexpected error occurred getting CWD for PID {pid}: {e}")
+        return None
+
+
+# --- Main Execution Function (for testing) ---
+def main(argv: list[str] | None = None) -> int:
+    """
+    Command-line entry point for testing pid functions.
     """
     parser = argparse.ArgumentParser(
-        description="List all descendant PIDs (children, grandchildren, etc.) for a given parent PID.",
+        description="Test PID utilities: List descendants or get CWD.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("pid", type=int, help="The PID of the parent process.")
+    parser.add_argument("pid", type=int, help="The PID of the target process.")
     parser.add_argument(
         "--log",
         default="WARNING",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Set the logging level (default: WARNING)",
     )
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--descendants", action="store_true", help="List descendant PIDs (default)."
+    )
+    mode_group.add_argument("--cwd", action="store_true", help="Get the process CWD.")
 
-    args = parser.parse_args(argv)  # Parses sys.argv[1:] if argv is None
-
-    # Configure logging level based on argument for standalone execution
+    args = parser.parse_args(argv)
     logging.getLogger().setLevel(args.log.upper())
 
     try:
-        # Call the renamed function
-        descendant_pids = get_descendants(args.pid)
-
-        # Print only the PIDs to stdout, one per line
-        for pid in descendant_pids:
-            print(pid)
-
-        return 0  # Success
-
+        if args.cwd:
+            cwd = get_cwd(args.pid)
+            if cwd:
+                print(cwd)
+            else:
+                print(f"Could not retrieve CWD for PID {args.pid}.", file=sys.stderr)
+                return 1
+        else:  # Default to descendants
+            descendant_pids = get_descendants(args.pid)
+            if not descendant_pids:
+                # Check if process exists at all
+                if not psutil.pid_exists(args.pid):
+                    print(f"Process {args.pid} not found.", file=sys.stderr)
+                    return 1
+                else:
+                    print(
+                        f"No descendants found for PID {args.pid}."
+                    )  # Or access denied
+            else:
+                for d_pid in descendant_pids:
+                    print(d_pid)
+        return 0
     except Exception as e:
-        # Catch any unexpected errors during execution
         log.critical(f"An unexpected error occurred in main: {e}", exc_info=True)
         return 1
 
-
-# --- Script Entry Point ---
 
 if __name__ == "__main__":
     sys.exit(main())

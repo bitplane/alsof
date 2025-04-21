@@ -1,15 +1,23 @@
 [project]
 name = "alsof"
-description = "an interactive lsof alternative"
+description = "An interactive lsof alternative"
 version = "0.0.1"
 authors = [
     { name = "Gareth Davidson", email = "gaz@bitplane.net" }
 ]
 readme = "README.md"
+requires-python = ">=3.10"
+
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: Public Domain", # WTFPL
+    "Operating System :: Linux",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 
 dependencies = [
-    "psutil",
-    "textual"
+    "psutil~=7.0",
+    "textual~=3.1"
 ]
 
 [project.optional-dependencies]

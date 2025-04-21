@@ -6,31 +6,51 @@ import shlex
 import sys
 import threading
 from collections import deque
-from typing import Callable, List, Optional, Union
 
 from alsof import app, strace
 from alsof.monitor import Monitor
 
+# No longer need rich.text here
+# from rich.text import Text
+
 
 class TextualLogHandler(logging.Handler):
-    """A logging handler that puts messages into a deque."""
+    """A logging handler that puts messages into a deque for Textual."""
 
     def __init__(self, log_queue: deque):
         super().__init__()
         self.log_queue = log_queue
+        # Basic formatter if none is set
+        self.setFormatter(logging.Formatter("%(name)s: %(message)s"))
 
     def emit(self, record: logging.LogRecord):
-        """Emit a record."""
+        """Emit a record, formatting it as a string with Rich markup."""
         try:
             msg = self.format(record)
-            self.log_queue.append(msg)
+            markup = ""
+            if record.levelno == logging.CRITICAL:
+                markup = f"[bold red]{msg}[/bold red]"
+            elif record.levelno == logging.ERROR:
+                markup = f"[red]{msg}[/red]"
+            elif record.levelno == logging.WARNING:
+                markup = f"[yellow]{msg}[/yellow]"
+            elif record.levelno == logging.INFO:
+                markup = f"[green]{msg}[/green]"
+            elif record.levelno == logging.DEBUG:
+                markup = f"[dim]{msg}[/dim]"
+            else:  # Default, no markup
+                markup = msg
+
+            # Append the MARKUP STRING to the queue
+            self.log_queue.append(markup)
+
         except Exception:
             self.handleError(record)
 
 
 # Basic config will be overridden by setup later if log level arg is used
 logging.basicConfig(
-    level=os.environ.get("LOGLEVEL", "WARNING").upper(), format="%(name)s: %(message)s"
+    level=os.environ.get("LOGLEVEL", "INFO").upper(), format="%(name)s: %(message)s"
 )  # Simplified format for app log
 log = logging.getLogger("alsof.cli")
 
@@ -40,9 +60,9 @@ DEFAULT_BACKEND = list(BACKENDS)[0]
 
 
 def _run_backend_thread(
-    backend_func: Callable,
+    backend_func: callable,  # Use lowercase callable
     monitor_instance: Monitor,
-    target_args: Union[List[str], List[int]],
+    target_args: list[str] | list[int],  # Use built-in list and |
 ):
     """Target function to run the selected backend in a thread."""
     thread_log = logging.getLogger(f"alsof.backend.{backend_func.__name__}")
@@ -54,7 +74,7 @@ def _run_backend_thread(
         thread_log.exception(f"Unexpected error in backend thread: {e}")
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:  # Use built-in list and |
     """
     Parses command line arguments, starts the selected backend in a thread,
     and attempts to launch the UI.
@@ -128,12 +148,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     log.info(f"Log level set to {log_level}. Logging to Textual UI via queue.")
 
     # --- Setup Monitoring ---
-    target_command: Optional[List[str]] = None
-    attach_ids: Optional[List[int]] = None
+    target_command: list[str] | None = None
+    attach_ids: list[int] | None = None
     monitor_id = "monitor_session"
-    backend_attach_func: Optional[Callable] = None
-    backend_run_func: Optional[Callable] = None
-    backend_target_args: Optional[Union[List[str], List[int]]] = None
+    backend_attach_func: callable | None = None
+    backend_run_func: callable | None = None
+    backend_target_args: list[str] | list[int] | None = None
 
     selected_backend_funcs = BACKENDS.get(args.backend)
     if not selected_backend_funcs:
