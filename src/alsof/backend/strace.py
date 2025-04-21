@@ -9,18 +9,15 @@ from collections.abc import Callable  # Use collections.abc
 
 import psutil
 
-# Modules from our package
-from alsof.monitor import Monitor
-
-# Import the new CWD function
-from alsof.pid import get_cwd as pid_get_cwd
-from alsof.strace_cmd import EXIT_SYSCALLS  # Import EXIT_SYSCALLS
-from alsof.strace_cmd import (
+from alsof.backend.strace_cmd import EXIT_SYSCALLS  # Import EXIT_SYSCALLS
+from alsof.backend.strace_cmd import (
     DEFAULT_SYSCALLS,
     PROCESS_SYSCALLS,
     Syscall,
     parse_strace_stream,
 )
+from alsof.monitor import Monitor
+from alsof.util.pid import get_cwd as pid_get_cwd
 
 # --- Setup Logging ---
 logging.basicConfig(

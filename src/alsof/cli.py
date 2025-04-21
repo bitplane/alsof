@@ -7,11 +7,9 @@ import sys
 import threading
 from collections import deque
 
-from alsof import app, strace
+from alsof.backend import lsof, strace
 from alsof.monitor import Monitor
-
-# No longer need rich.text here
-# from rich.text import Text
+from alsof.ui import app
 
 
 class TextualLogHandler(logging.Handler):
@@ -20,26 +18,35 @@ class TextualLogHandler(logging.Handler):
     def __init__(self, log_queue: deque):
         super().__init__()
         self.log_queue = log_queue
-        # Basic formatter if none is set
-        self.setFormatter(logging.Formatter("%(name)s: %(message)s"))
+        # Define a formatter that includes timestamp
+        formatter = logging.Formatter(
+            "%(asctime)s %(name)s: %(message)s",
+            datefmt="%H:%M:%S",  # Example format: HH:MM:SS
+        )
+        self.setFormatter(formatter)
 
     def emit(self, record: logging.LogRecord):
         """Emit a record, formatting it as a string with Rich markup."""
         try:
-            msg = self.format(record)
+            # msg = self.format(record)
             markup = ""
+            # Apply color markup *after* formatting to keep timestamp uncolored initially
+            # Or include timestamp in color? Let's keep timestamp default color.
+            plain_msg = f"{record.name}: {record.getMessage()}"  # Get message without timestamp for coloring
+            timestamp = self.formatter.formatTime(record, self.formatter.datefmt)
+
             if record.levelno == logging.CRITICAL:
-                markup = f"[bold red]{msg}[/bold red]"
+                markup = f"{timestamp} [bold red]{plain_msg}[/bold red]"
             elif record.levelno == logging.ERROR:
-                markup = f"[red]{msg}[/red]"
+                markup = f"{timestamp} [red]{plain_msg}[/red]"
             elif record.levelno == logging.WARNING:
-                markup = f"[yellow]{msg}[/yellow]"
+                markup = f"{timestamp} [yellow]{plain_msg}[/yellow]"
             elif record.levelno == logging.INFO:
-                markup = f"[green]{msg}[/green]"
+                markup = f"{timestamp} [green]{plain_msg}[/green]"
             elif record.levelno == logging.DEBUG:
-                markup = f"[dim]{msg}[/dim]"
+                markup = f"{timestamp} [dim]{plain_msg}[/dim]"
             else:  # Default, no markup
-                markup = msg
+                markup = f"{timestamp} {plain_msg}"  # Use plain_msg here too
 
             # Append the MARKUP STRING to the queue
             self.log_queue.append(markup)
@@ -49,12 +56,14 @@ class TextualLogHandler(logging.Handler):
 
 
 # Basic config will be overridden by setup later if log level arg is used
+# Set root logger level, but handler format controls output appearance
 logging.basicConfig(
-    level=os.environ.get("LOGLEVEL", "INFO").upper(), format="%(name)s: %(message)s"
-)  # Simplified format for app log
+    level=os.environ.get("LOGLEVEL", "INFO").upper()
+    # format="%(name)s: %(message)s" # Format now handled by TextualLogHandler
+)
 log = logging.getLogger("alsof.cli")
 
-BACKENDS = {"strace": (strace.attach, strace.run)}
+BACKENDS = {"strace": (strace.attach, strace.run), "lsof": (lsof.attach, lsof.run)}
 
 DEFAULT_BACKEND = list(BACKENDS)[0]
 
@@ -98,8 +107,6 @@ def main(argv: list[str] | None = None) -> int:  # Use built-in list and |
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Set the logging level (default: INFO)",
     )
-    # Log file argument - consider adding later if needed
-    # parser.add_argument('--log-file', default=None, help='Redirect logs to a file.')
 
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument(
@@ -133,17 +140,8 @@ def main(argv: list[str] | None = None) -> int:  # Use built-in list and |
 
     # Add our custom handler
     textual_handler = TextualLogHandler(log_queue)
-    # Optional: Add a formatter if desired, otherwise uses root logger's effective format
-    # formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    # textual_handler.setFormatter(formatter)
+    # The handler now defines its own format including timestamp
     root_logger.addHandler(textual_handler)
-
-    # Optional: Add a handler just for stderr/file if needed *in addition* to Textual
-    # console_handler = logging.StreamHandler(sys.stderr)
-    # console_handler.setLevel(log_level)
-    # console_formatter = logging.Formatter('%(asctime)s %(levelname)s:%(name)s:%(message)s')
-    # console_handler.setFormatter(console_formatter)
-    # root_logger.addHandler(console_handler)
 
     log.info(f"Log level set to {log_level}. Logging to Textual UI via queue.")
 
@@ -207,6 +205,8 @@ def main(argv: list[str] | None = None) -> int:  # Use built-in list and |
     log.info("Attempting to launch UI...")
     exit_code = 0
     try:
+        # Import app.main locally to avoid circular dependencies if app imports cli stuff
+
         log.info("Launching app.main()...")
         # Pass the monitor instance AND the log queue to the app
         app.main(monitor=monitor, log_queue=log_queue)

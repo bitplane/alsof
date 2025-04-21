@@ -2,11 +2,10 @@ import logging
 import os
 import time
 from collections import deque
-from collections.abc import Iterator  # Import from collections.abc
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 
-# Assumes versioned.py contains Versioned, changes, waits
-from alsof.versioned import Versioned, changes, waits  # Use absolute import
+from alsof.util.versioned import Versioned, changes, waits
 
 # --- Setup Logging ---
 logging.basicConfig(

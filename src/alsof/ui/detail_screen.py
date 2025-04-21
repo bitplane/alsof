@@ -1,0 +1,95 @@
+# Filename: screens/detail_screen.py
+"""Modal screen for displaying file event history."""
+
+import datetime
+import logging
+
+from rich.text import Text
+from textual.app import ComposeResult
+from textual.binding import Binding
+from textual.containers import Container
+from textual.screen import ModalScreen
+from textual.widgets import Label, Log
+
+# Import necessary types and functions
+from alsof.monitor import FileInfo
+from alsof.utils import short_path  # Use the new short_path function
+
+log = logging.getLogger(__name__)  # Use module-specific logger
+
+
+class DetailScreen(ModalScreen[None]):
+    """Screen to display event history for a specific file."""
+
+    BINDINGS = [Binding("escape,q", "app.pop_screen", "Close", show=True)]
+
+    def __init__(self, file_info: FileInfo):
+        self.file_info = file_info
+        super().__init__()
+
+    def compose(self) -> ComposeResult:
+        """Create child widgets for the detail screen."""
+        yield Container(
+            Label(f"Event History for: {self.file_info.path}"),
+            Log(
+                id="event-log",
+                max_lines=1000,
+                markup=True,  # Keep markup for this one (it uses manual markup)
+            ),
+            id="detail-container",
+        )
+
+    def on_mount(self) -> None:
+        """Called when the screen is mounted. Populates the log."""
+        try:
+            log_widget = self.query_one(Log)
+            history = self.file_info.event_history
+            log.debug(f"DetailScreen on_mount: History length = {len(history)}")
+            # log.debug(f"DetailScreen on_mount: History content = {history}") # Avoid logging potentially large history
+            if not history:
+                log_widget.write_line("No event history recorded.")
+                return
+
+            # Add header row
+            log_widget.write_line("Timestamp         | Type     | Success | Details")
+            log_widget.write_line(
+                "-----------------|----------|---------|------------------------------------------------------------"  # Adjusted separator length
+            )
+
+            # Add event rows
+            for event in history:
+                ts_raw = event.get("ts", 0)
+                try:
+                    # Ensure timestamp conversion handles potential errors robustly
+                    if isinstance(ts_raw, (int, float)) and ts_raw > 0:
+                        ts = datetime.datetime.fromtimestamp(ts_raw).strftime(
+                            "%H:%M:%S.%f"
+                        )[:-3]
+                    else:
+                        ts = str(ts_raw)[:17].ljust(17)  # Fallback formatting
+                except (
+                    TypeError,
+                    ValueError,
+                    OSError,
+                ) as ts_err:  # Catch potential timestamp errors
+                    log.warning(f"Could not format timestamp {ts_raw}: {ts_err}")
+                    ts = str(ts_raw)[:17].ljust(17)  # Fallback formatting
+
+                etype = str(event.get("type", "?")).ljust(8)
+                success = (
+                    "[green]OK[/]" if event.get("success", False) else "[red]FAIL[/]"
+                )
+                # Calculate visible length correctly based on markup
+                visible_len = len(Text.from_markup(success).plain)
+                padding = " " * (7 - visible_len)
+                success_padded = f"{success}{padding}"
+                details = str(event.get("details", {}))
+                # Use the new short_path function for details truncation
+                details_display = short_path(details.replace("\n", "\\n"), 60)
+                log_widget.write_line(
+                    f"{ts} | {etype} | {success_padded} | {details_display}"
+                )
+        except Exception as e:
+            log.error(f"Error populating detail screen: {e}", exc_info=True)
+            # Optionally notify the user
+            self.notify("Error loading details.", severity="error")
