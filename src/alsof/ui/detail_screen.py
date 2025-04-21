@@ -11,11 +11,10 @@ from textual.containers import Container
 from textual.screen import ModalScreen
 from textual.widgets import Label, Log
 
-# Import necessary types and functions
 from alsof.monitor import FileInfo
-from alsof.utils import short_path  # Use the new short_path function
+from alsof.util.short_path import short_path
 
-log = logging.getLogger(__name__)  # Use module-specific logger
+log = logging.getLogger(__name__)
 
 
 class DetailScreen(ModalScreen[None]):
@@ -34,7 +33,7 @@ class DetailScreen(ModalScreen[None]):
             Log(
                 id="event-log",
                 max_lines=1000,
-                markup=True,  # Keep markup for this one (it uses manual markup)
+                markup=True,
             ),
             id="detail-container",
         )
@@ -45,7 +44,6 @@ class DetailScreen(ModalScreen[None]):
             log_widget = self.query_one(Log)
             history = self.file_info.event_history
             log.debug(f"DetailScreen on_mount: History length = {len(history)}")
-            # log.debug(f"DetailScreen on_mount: History content = {history}") # Avoid logging potentially large history
             if not history:
                 log_widget.write_line("No event history recorded.")
                 return
@@ -53,7 +51,7 @@ class DetailScreen(ModalScreen[None]):
             # Add header row
             log_widget.write_line("Timestamp         | Type     | Success | Details")
             log_widget.write_line(
-                "-----------------|----------|---------|------------------------------------------------------------"  # Adjusted separator length
+                "-----------------|----------|---------|------------------------------------------------------------"
             )
 
             # Add event rows
@@ -91,5 +89,4 @@ class DetailScreen(ModalScreen[None]):
                 )
         except Exception as e:
             log.error(f"Error populating detail screen: {e}", exc_info=True)
-            # Optionally notify the user
-            self.notify("Error loading details.", severity="error")
+            self.notify(f"Error loading details. {e}", severity="error")
