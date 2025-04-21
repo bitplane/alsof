@@ -28,20 +28,14 @@ def _relative_path(path: str, cwd: str = CWD) -> str:
 def _truncate_directory(directory: str, max_dir_len: int) -> str:
     """Truncates the directory string in the middle."""
     ellipsis = "..."
-    if len(directory) <= max_dir_len:
-        return directory  # Fits
 
-    if max_dir_len < len(ellipsis):
-        return ellipsis[:max_dir_len]  # Not enough space for ellipsis
-
-    # Calculate how many directory characters to keep
     dir_keep_total = max_dir_len - len(ellipsis)
-    start_len = max(0, dir_keep_total // 2)
-    end_len = max(0, dir_keep_total - start_len)
+    start_len = dir_keep_total // 2
+    end_len = dir_keep_total - start_len
 
     # Ensure slicing indices are valid
-    start_len = min(start_len, len(directory))
-    end_slice_start = max(start_len, len(directory) - end_len)
+    start_len = start_len
+    end_slice_start = len(directory) - end_len
     end_part = directory[end_slice_start:]
 
     return f"{directory[:start_len]}{ellipsis}{end_part}"
@@ -67,32 +61,23 @@ def short_path(path: str | os.PathLike, max_length: int, cwd: str = CWD) -> str:
 
     if len(path_str) <= max_length:
         return path_str
+    if max_length <= 0:
+        return ""
     if max_length <= len(ellipsis):
-        return path_str[:max_length]  # Simple truncation if too short for ellipsis
+        return path_str[-max_length:]
 
     directory, filename = os.path.split(path_str)
 
-    # --- Case 1: Filename truncation needed? ---
     # Check if filename + ellipsis is too long
     if len(ellipsis) + len(filename) >= max_length:
-        keep_chars = max(1, max_length - len(ellipsis))
+        keep_chars = max_length - len(ellipsis)
         return ellipsis + filename[-keep_chars:]
 
-    # --- Case 2: Directory truncation needed? ---
     # Filename fits, check if dir needs shortening.
     len_sep_before_file = len(os.sep) if directory else 0
     max_dir_len = max_length - len(filename) - len_sep_before_file
 
-    if max_dir_len <= 0 or not directory:
-        # Can't fit directory part, or no directory exists.
-        # Truncate the whole path_str from the left instead of returning just filename.
-        keep_chars = max(1, max_length - len(ellipsis))
-        final_path = ellipsis + path_str[-keep_chars:]
-    else:
-        # Directory exists and there's some space for it.
-        truncated_dir = _truncate_directory(directory, max_dir_len)
-        final_path = os.path.join(truncated_dir, filename)
-
-    # Final safety check removed
+    truncated_dir = _truncate_directory(directory, max_dir_len)
+    final_path = truncated_dir + os.sep + filename
 
     return final_path

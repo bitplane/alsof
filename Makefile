@@ -3,7 +3,7 @@
 		pre-commit update-pre-commit
 
 
-PROJECT_NAME := aslof
+PROJECT_NAME := alsof
 
 
 all: dev coverage  ## builds everything
