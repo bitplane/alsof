@@ -8,18 +8,21 @@ from collections import deque
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.containers import Container
 from textual.coordinate import Coordinate
 from textual.reactive import reactive
+
+# Import the specific message type
 from textual.widgets import DataTable, Footer, Static
-from textual.widgets.data_table import CellKey  # Keep CellKey
+
+# Import RowKey and ensure DataTable.RowSelected is implicitly available or import explicitly if needed
+from textual.widgets.data_table import CellKey, RowKey
 
 # Local application imports
 from alsof.monitor import FileInfo, Monitor
 from alsof.util.short_path import short_path
 
 # Import the screen classes from their new locations
-# Assuming they are in the same directory (ui/)
-# If you place them in ui/screens/, change to from .screens.log_screen import LogScreen etc.
 from .detail_screen import DetailScreen
 from .log_screen import LogScreen
 
@@ -37,19 +40,15 @@ class FileApp(App[None]):
         Binding("q,escape", "quit", "Quit", show=True, priority=True),
         Binding("x", "ignore_all", "Ignore All", show=True),
         Binding("i,backspace,delete", "ignore_selected", "Ignore Selected", show=True),
-        Binding("enter", "show_details", "Show Details", show=True),
+        # Removed "enter" binding - will use message handler instead
         Binding("ctrl+l", "show_log", "Show Log / Close Log", show=True),
         Binding("ctrl+d", "dump_monitor", "Dump Monitor", show=False),  # Debug binding
     ]
-    # Keep CSS related to the main app and potentially screen containers if needed globally
-    # CSS specific to LogScreen/DetailScreen should ideally be moved to those files/screens.
     CSS = """
     Screen { border: none; }
     DataTable { height: 1fr; border: none; }
     #status-bar { height: auto; dock: bottom; color: $text-muted; padding: 0 1; }
 
-    /* Styling for the containers *hosting* the modal screens */
-    /* This can stay here or move if you prefer more encapsulation */
     LogScreen > Container {
         border: thick $accent; padding: 1; width: 80%; height: 80%; background: $surface;
     }
@@ -61,12 +60,7 @@ class FileApp(App[None]):
     last_monitor_version = reactive(-1)
 
     def __init__(self, monitor: Monitor, log_queue: deque):
-        """Initialize the FileApp.
-
-        Args:
-            monitor (Monitor): The file monitor instance.
-            log_queue (deque): The queue for log messages.
-        """
+        """Initialize the FileApp."""
         super().__init__()
         self.monitor = monitor
         self.log_queue = log_queue
@@ -74,6 +68,7 @@ class FileApp(App[None]):
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the main application screen."""
+        # Give the DataTable an explicit ID so we can target its messages
         yield DataTable(id="file-table", cursor_type="row", zebra_stripes=True)
         yield Static("Status: Initializing...", id="status-bar")
         yield Footer()
@@ -83,8 +78,10 @@ class FileApp(App[None]):
         table = self.query_one(DataTable)
         table.add_column("?", key="emoji", width=3)
         table.add_column("Activity", key="activity", width=10)
-        table.add_column("Path", key="path")  # Let path take remaining width
+        table.add_column("Path", key="path")
         self.update_table()
+        table.focus()
+        log.debug("DataTable focused on mount.")
         self.set_interval(self._update_interval, self.update_table)
         self.update_status("Monitoring started...")
         log.info("UI Mounted, starting update timer.")
@@ -95,7 +92,7 @@ class FileApp(App[None]):
             status_bar = self.query_one("#status-bar", Static)
             status_bar.update(text)
         except Exception:
-            pass  # Ignore errors if status bar not found
+            pass
 
     def _get_emoji_for_file(self, info: FileInfo) -> str:
         """Determines the appropriate emoji based on file status and activity."""
@@ -103,11 +100,9 @@ class FileApp(App[None]):
             return "❌"
         if info.status == "error" or info.last_error_enoent:
             return "❗"
-
         recent_types = list(info.recent_event_types)
         has_read = "READ" in recent_types
         has_write = "WRITE" in recent_types
-
         if has_read and has_write:
             return "↔️"
         if has_write:
@@ -126,16 +121,15 @@ class FileApp(App[None]):
             return "🚪"
         if info.status == "unknown" and info.event_history:
             return "❔"
-        return " "  # Default blank
+        return " "
 
     def update_table(self) -> None:
         """Updates the DataTable with the latest file information."""
         if not self.monitor:
             return
-
         current_version = self.monitor.version
         if current_version == self.last_monitor_version:
-            return  # No changes in the monitor state
+            return
 
         log.info(
             f"Monitor version changed ({self.last_monitor_version} -> {current_version}), updating table."
@@ -149,7 +143,6 @@ class FileApp(App[None]):
             log.warning("Could not query table/status bar during update.")
             return
 
-        # --- Calculate Path Width ---
         other_cols_width = 0
         col_count = 0
         fixed_width_cols = {"emoji", "activity"}
@@ -159,97 +152,77 @@ class FileApp(App[None]):
                 other_cols_width += col.width
 
         table_width = table.content_size.width
-        # Account for column separators (roughly col_count + 1)
         padding = max(0, col_count + 1)
         available_width = max(10, table_width - other_cols_width - padding)
 
-        # --- Get and Sort Data ---
-        all_files = list(self.monitor)  # Uses Monitor.__iter__
+        all_files = list(self.monitor)
         active_files = [
             info for info in all_files if info.path not in self.monitor.ignored_paths
         ]
-        # Sort by most recent activity first
         active_files.sort(key=lambda info: info.last_activity_ts, reverse=True)
         log.debug(f"update_table: Processing {len(active_files)} active files.")
 
-        # --- Preserve Cursor ---
         selected_path_key = None
         coordinate: Coordinate | None = table.cursor_coordinate
         if table.is_valid_coordinate(coordinate):
             try:
-                # Use coordinate_to_cell_key which is more robust
                 cell_key: CellKey | None = table.coordinate_to_cell_key(coordinate)
                 selected_path_key = cell_key.row_key if cell_key else None
-                # if selected_path_key is not None: log.debug(f"Cursor key preserved: '{selected_path_key}'")
             except Exception as e:
                 log.debug(f"Error getting cursor row key: {e}")
                 selected_path_key = None
 
-        # --- Repopulate Table ---
         table.clear()
-        row_keys_added_this_update = set()  # Prevent duplicates if monitor state is odd
+        row_keys_added_this_update = set()
 
         for info in active_files:
-            row_key = info.path
-            if row_key in row_keys_added_this_update:
-                log.warning(f"Skipping duplicate path in update_table loop: {row_key}")
+            row_key_value = info.path  # This is the actual path string
+            if row_key_value in row_keys_added_this_update:
+                log.warning(
+                    f"Skipping duplicate path in update_table loop: {row_key_value}"
+                )
                 continue
-            row_keys_added_this_update.add(row_key)
+            row_keys_added_this_update.add(row_key_value)
 
             emoji = self._get_emoji_for_file(info)
-            path_display = short_path(info.path, available_width)  # Use utility
-            # Display byte counts or status
+            path_display = short_path(info.path, available_width)
             activity_str = (
                 f"{info.bytes_read}r/{info.bytes_written}w"
                 if (info.bytes_read or info.bytes_written)
                 else (
                     info.status
-                    if info.status
-                    not in [
-                        "unknown",
-                        "accessed",
-                        "closed",
-                        "active",
-                    ]  # Show significant statuses
+                    if info.status not in ["unknown", "accessed", "closed", "active"]
                     else ""
                 )
             )
-            # Determine row style based on status
             style = ""
             if info.status == "deleted":
                 style = "strike"
-            elif info.last_error_enoent:  # File not found error is significant
+            elif info.last_error_enoent:
                 style = "dim strike"
             elif info.status == "error":
                 style = "red"
             elif info.is_open:
-                style = (
-                    "bold green" if info.status == "active" else "bold"
-                )  # Highlight open & active
+                style = "bold green" if info.status == "active" else "bold"
             elif info.status == "active":
-                style = "green"  # Recently read/written but now closed
+                style = "green"
             elif info.last_event_type == "STAT" and not info.is_open:
-                style = "yellow"  # Accessed but not open
+                style = "yellow"
 
-            # Create Text objects for styling
             row_data = (
                 Text(f" {emoji} ", style=style),
                 Text(activity_str, style=style),
                 Text(path_display, style=style),
             )
-
             try:
-                # Add row with the path as the key
-                table.add_row(*row_data, key=row_key)
+                # Use the actual path string as the key value
+                table.add_row(*row_data, key=row_key_value)
             except Exception as add_exc:
-                # Log if adding a row fails for some reason
-                log.exception(f"Error adding row for key {row_key}: {add_exc}")
+                log.exception(f"Error adding row for key {row_key_value}: {add_exc}")
 
-        # --- Restore Cursor ---
         new_row_index = -1
         if selected_path_key is not None and selected_path_key in table.rows:
             try:
-                # Find the new index of the previously selected row key
                 new_row_index = table.get_row_index(selected_path_key)
             except Exception as e:
                 log.debug(
@@ -257,21 +230,67 @@ class FileApp(App[None]):
                 )
                 new_row_index = -1
 
-        # Move cursor if the row still exists, otherwise move to top (if table not empty)
         if new_row_index != -1 and new_row_index < table.row_count:
             table.move_cursor(row=new_row_index, animate=False)
         elif table.row_count > 0 and (selected_path_key is None or new_row_index == -1):
-            # If previous selection gone or invalid, move to top row if possible
             current_cursor_row, _ = table.cursor_coordinate
-            if current_cursor_row != 0:  # Avoid moving if already at top
+            if current_cursor_row != 0:
                 table.move_cursor(row=0, animate=False)
 
-        # --- Update Status Bar ---
         status_bar.update(
-            f"Tracking {len(active_files)} files. "
-            f"Ignored: {len(self.monitor.ignored_paths)}. "
-            f"Monitor v{current_version}"
+            f"Tracking {len(active_files)} files. Ignored: {len(self.monitor.ignored_paths)}. Monitor v{current_version}"
         )
+
+    # --- Message Handler ---
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Called when the user presses Enter on a DataTable row."""
+        log.debug(
+            f"on_data_table_row_selected triggered. Event row_key obj: {event.row_key!r}"
+        )
+
+        # Make sure the event came from our main file table
+        if event.control.id != "file-table":
+            log.debug(
+                f"Ignoring RowSelected event from control id '{event.control.id}'"
+            )
+            return
+
+        # --- FIX: Use event.row_key.value ---
+        row_key_obj: RowKey | None = event.row_key
+        if row_key_obj is None or row_key_obj.value is None:
+            log.error(
+                "DataTable.RowSelected message received but row_key or its value is None."
+            )
+            self.notify("Could not identify selected row key value.", severity="error")
+            return
+
+        # Get the actual path string from the RowKey's value
+        path = str(row_key_obj.value)
+        # ------------------------------------
+
+        log.debug(f"Showing details for selected path: {path}")
+
+        try:
+            # Get the FileInfo object from the monitor using the correct path string
+            file_info = self.monitor.files.get(path)
+            if file_info:
+                # Push the imported DetailScreen
+                log.debug(f"Found FileInfo, pushing DetailScreen for {path}")
+                self.push_screen(DetailScreen(file_info))
+            else:
+                # Handle case where file state might have changed since table update
+                log.warning(
+                    f"File '{path}' (from row_key.value) not found in monitor state."
+                )
+                self.notify(
+                    "File state not found (may have changed).",
+                    severity="warning",
+                    timeout=3,
+                )
+        except Exception as e:
+            log.exception(f"Error pushing DetailScreen for path: {path}")
+            self.notify(f"Error showing details: {e}", severity="error")
 
     # --- Actions ---
 
@@ -287,17 +306,19 @@ class FileApp(App[None]):
             self.notify("No row selected.", severity="warning")
             return
         try:
-            # Use coordinate_to_cell_key which is more robust
+            # Need to get the key value from the coordinate here too
             cell_key: CellKey | None = table.coordinate_to_cell_key(coordinate)
-            row_key = cell_key.row_key if cell_key else None
+            row_key_obj = cell_key.row_key if cell_key else None
 
-            if row_key is not None:
-                path_to_ignore = str(row_key)
+            if row_key_obj is not None and row_key_obj.value is not None:
+                path_to_ignore = str(row_key_obj.value)  # Use .value here too
                 log.info(f"Ignoring selected path: {path_to_ignore}")
-                self.monitor.ignore(path_to_ignore)  # Call monitor method
+                self.monitor.ignore(path_to_ignore)
                 self.notify(f"Ignored: {short_path(path_to_ignore, 60)}", timeout=2)
             else:
-                self.notify("Could not get key for selected row.", severity="error")
+                self.notify(
+                    "Could not get key value for selected row.", severity="error"
+                )
         except Exception as e:
             log.exception("Error ignoring selected.")
             self.notify(f"Error ignoring file: {e}", severity="error")
@@ -306,63 +327,26 @@ class FileApp(App[None]):
         """Action to ignore all currently tracked files."""
         log.info("Ignoring all tracked files.")
         try:
-            # Count how many are *currently* tracked before ignoring
             count_before = len(
                 [fi for fi in self.monitor if fi.path not in self.monitor.ignored_paths]
             )
-            self.monitor.ignore_all()  # Call monitor method
+            self.monitor.ignore_all()
             self.notify(f"Ignoring {count_before} currently tracked files.", timeout=2)
         except Exception as e:
             log.exception("Error ignoring all.")
             self.notify(f"Error ignoring all files: {e}", severity="error")
 
-    def action_show_details(self) -> None:
-        """Action to show the detail screen for the selected file."""
-        table = self.query_one(DataTable)
-        coordinate = table.cursor_coordinate
-        if not table.is_valid_coordinate(coordinate):
-            self.notify("No row selected.", severity="warning")
-            return
-        path = None
-        try:
-            # Use coordinate_to_cell_key which is more robust
-            cell_key: CellKey | None = table.coordinate_to_cell_key(coordinate)
-            row_key = cell_key.row_key if cell_key else None
-
-            if row_key is not None:
-                path = str(row_key)
-                log.debug(f"Showing details for: {path}")
-                # Get the FileInfo object from the monitor
-                file_info = self.monitor.files.get(path)
-                if file_info:
-                    # Push the imported DetailScreen
-                    self.push_screen(DetailScreen(file_info))
-                else:
-                    # Handle case where file state might have been removed between updates
-                    log.warning(f"File '{path}' disappeared before showing details.")
-                    self.notify(
-                        "File state not found (may have been removed).",
-                        severity="warning",
-                        timeout=3,
-                    )
-            else:
-                self.notify("Could not get key for selected row.", severity="error")
-        except Exception as e:
-            log.exception("Error showing details.")
-            self.notify(f"Error showing details: {e}", severity="error")
+    # Note: action_show_details is removed as its logic is now in on_data_table_row_selected
 
     def action_show_log(self) -> None:
         """Action to show or hide the log screen."""
-        # Check if the top screen is already the LogScreen instance
         if isinstance(self.screen, LogScreen):
             self.pop_screen()
             log.debug("Popped LogScreen via action_show_log.")
-        # Check if LogScreen is installed but not necessarily top (e.g., Detail on top of Log)
         elif self.is_screen_installed(LogScreen):
-            self.pop_screen()  # Pop whatever is on top to reveal LogScreen
+            self.pop_screen()
             log.debug("Popped current screen to reveal LogScreen.")
         else:
-            # Push the imported LogScreen
             log.info("Action: show_log triggered. Pushing LogScreen.")
             self.push_screen(LogScreen(self.log_queue))
 
@@ -376,15 +360,14 @@ class FileApp(App[None]):
                 f"PID->FD Map ({len(self.monitor.pid_fd_map)} pids): {self.monitor.pid_fd_map!r}"
             )
             log.debug(f"Files Dict ({len(self.monitor.files)} items):")
-            # Sort dump by path for consistency
             sorted_files = sorted(list(self.monitor), key=lambda f: f.path)
             for info in sorted_files:
                 log.debug(f"  {info.path}: {info!r}")
             log.debug("--- End Monitor State Dump ---")
             self.notify("Monitor state dumped to log (debug level).")
         except Exception as e:
-            log.exception(f"Error during monitor state dump. {e}")
-            self.notify(f"Error dumping monitor state. {e}", severity="error")
+            log.exception("Error during monitor state dump.")
+            self.notify("Error dumping monitor state.", severity="error")
 
 
 # This main function is usually called by cli.py, but can be useful for testing

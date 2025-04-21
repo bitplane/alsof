@@ -35,6 +35,7 @@ class LogScreen(ModalScreen[None]):
                 auto_scroll=True,
                 wrap=False,
                 highlight=True,
+                markup=True,
             )
 
     def on_mount(self) -> None:

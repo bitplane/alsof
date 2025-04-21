@@ -28,11 +28,8 @@ class TextualLogHandler(logging.Handler):
     def emit(self, record: logging.LogRecord):
         """Emit a record, formatting it as a string with Rich markup."""
         try:
-            # msg = self.format(record)
             markup = ""
-            # Apply color markup *after* formatting to keep timestamp uncolored initially
-            # Or include timestamp in color? Let's keep timestamp default color.
-            plain_msg = f"{record.name}: {record.getMessage()}"  # Get message without timestamp for coloring
+            plain_msg = f"{record.name}: {record.getMessage()}"
             timestamp = self.formatter.formatTime(record, self.formatter.datefmt)
 
             if record.levelno == logging.CRITICAL:
@@ -42,13 +39,12 @@ class TextualLogHandler(logging.Handler):
             elif record.levelno == logging.WARNING:
                 markup = f"{timestamp} [yellow]{plain_msg}[/yellow]"
             elif record.levelno == logging.INFO:
-                markup = f"{timestamp} [green]{plain_msg}[/green]"
+                markup = f"{timestamp} {plain_msg}"
             elif record.levelno == logging.DEBUG:
                 markup = f"{timestamp} [dim]{plain_msg}[/dim]"
-            else:  # Default, no markup
-                markup = f"{timestamp} {plain_msg}"  # Use plain_msg here too
+            else:
+                markup = f"{timestamp} {plain_msg}"
 
-            # Append the MARKUP STRING to the queue
             self.log_queue.append(markup)
 
         except Exception:
@@ -57,10 +53,7 @@ class TextualLogHandler(logging.Handler):
 
 # Basic config will be overridden by setup later if log level arg is used
 # Set root logger level, but handler format controls output appearance
-logging.basicConfig(
-    level=os.environ.get("LOGLEVEL", "INFO").upper()
-    # format="%(name)s: %(message)s" # Format now handled by TextualLogHandler
-)
+logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO").upper())
 log = logging.getLogger("alsof.cli")
 
 BACKENDS = {"strace": (strace.attach, strace.run), "lsof": (lsof.attach, lsof.run)}
@@ -205,10 +198,7 @@ def main(argv: list[str] | None = None) -> int:  # Use built-in list and |
     log.info("Attempting to launch UI...")
     exit_code = 0
     try:
-        # Import app.main locally to avoid circular dependencies if app imports cli stuff
-
         log.info("Launching app.main()...")
-        # Pass the monitor instance AND the log queue to the app
         app.main(monitor=monitor, log_queue=log_queue)
         log.info("UI main function finished.")
 
