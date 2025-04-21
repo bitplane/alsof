@@ -9,18 +9,12 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container
 from textual.screen import ModalScreen
-
-# --- CHANGE: Import RichLog instead of Log ---
 from textual.widgets import Label, RichLog
 
-# Import necessary types and functions
 from alsof.monitor import FileInfo
-
-# Assuming utils is one level up from ui? Adjust if needed.
-# If utils is alsof.util, use that. Let's assume alsof.util
 from alsof.util.short_path import short_path
 
-log = logging.getLogger(__name__)  # Use module-specific logger
+log = logging.getLogger(__name__)
 
 
 class DetailScreen(ModalScreen[None]):
@@ -36,37 +30,26 @@ class DetailScreen(ModalScreen[None]):
         """Create child widgets for the detail screen."""
         yield Container(
             Label(f"Event History for: {self.file_info.path}"),
-            # --- CHANGE: Use RichLog ---
             RichLog(
                 id="event-log",
                 max_lines=1000,
-                markup=True,  # RichLog accepts markup=True
-                highlight=True,  # Optional: Enable syntax highlighting
-                wrap=False,  # Optional: Set wrapping preference
+                markup=True,
+                highlight=True,
+                wrap=False,
             ),
-            # ---------------------------
             id="detail-container",
         )
 
     def on_mount(self) -> None:
         """Called when the screen is mounted. Populates the log."""
         try:
-            # --- CHANGE: Query RichLog ---
             log_widget = self.query_one(RichLog)
-            # -----------------------------
             history = self.file_info.event_history
             log.debug(f"DetailScreen on_mount: History length = {len(history)}")
             if not history:
-                log_widget.write("No event history recorded.")  # Use write for RichLog
+                log_widget.write("No event history recorded.")
                 return
 
-            # Add header row - write handles adding newline
-            log_widget.write("Timestamp         | Type     | Success | Details")
-            log_widget.write(
-                "-----------------|----------|---------|------------------------------------------------------------"
-            )
-
-            # Add event rows
             for event in history:
                 ts_raw = event.get("ts", 0)
                 try:
@@ -81,21 +64,17 @@ class DetailScreen(ModalScreen[None]):
                     ts = str(ts_raw)[:17].ljust(17)
 
                 etype = str(event.get("type", "?")).ljust(8)
-                # RichLog will correctly render this markup string
                 success = (
                     "[green]OK[/]" if event.get("success", False) else "[red]FAIL[/]"
                 )
                 # Calculate padding based on plain text length
                 visible_len = len(Text.from_markup(success).plain)
-                padding = " " * max(
-                    0, (7 - visible_len)
-                )  # Ensure padding isn't negative
+                padding = " " * max(0, (7 - visible_len))
                 success_padded = f"{success}{padding}"
 
                 details = str(event.get("details", {}))
                 details_display = short_path(details.replace("\n", "\\n"), 60)
 
-                # Use write, which handles the markup string correctly
                 log_widget.write(
                     f"{ts} | {etype} | {success_padded} | {details_display}"
                 )

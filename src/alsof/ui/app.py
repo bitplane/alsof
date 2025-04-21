@@ -4,32 +4,21 @@
 import logging
 from collections import deque
 
-# Third-party imports
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container
 from textual.coordinate import Coordinate
 from textual.reactive import reactive
-
-# Import the specific message type
 from textual.widgets import DataTable, Footer, Static
-
-# Import RowKey and ensure DataTable.RowSelected is implicitly available or import explicitly if needed
 from textual.widgets.data_table import CellKey, RowKey
 
-# Local application imports
 from alsof.monitor import FileInfo, Monitor
 from alsof.util.short_path import short_path
 
-# Import the screen classes from their new locations
 from .detail_screen import DetailScreen
 from .log_screen import LogScreen
 
-log = logging.getLogger("alsof.app")  # Use package-aware logger name
-
-
-# --- Main Application ---
+log = logging.getLogger("alsof.app")
 
 
 class FileApp(App[None]):
@@ -37,10 +26,9 @@ class FileApp(App[None]):
 
     TITLE = "alsof - Another lsof"
     BINDINGS = [
-        Binding("q,escape", "quit", "Quit", show=True, priority=True),
+        Binding("q,escape", "quit", "Quit", show=True),
         Binding("x", "ignore_all", "Ignore All", show=True),
         Binding("i,backspace,delete", "ignore_selected", "Ignore Selected", show=True),
-        # Removed "enter" binding - will use message handler instead
         Binding("ctrl+l", "show_log", "Show Log / Close Log", show=True),
         Binding("ctrl+d", "dump_monitor", "Dump Monitor", show=False),  # Debug binding
     ]
@@ -64,11 +52,10 @@ class FileApp(App[None]):
         super().__init__()
         self.monitor = monitor
         self.log_queue = log_queue
-        self._update_interval = 1.0  # Update interval in seconds
+        self._update_interval = 1.0
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the main application screen."""
-        # Give the DataTable an explicit ID so we can target its messages
         yield DataTable(id="file-table", cursor_type="row", zebra_stripes=True)
         yield Static("Status: Initializing...", id="status-bar")
         yield Footer()
@@ -238,7 +225,8 @@ class FileApp(App[None]):
                 table.move_cursor(row=0, animate=False)
 
         status_bar.update(
-            f"Tracking {len(active_files)} files. Ignored: {len(self.monitor.ignored_paths)}. Monitor v{current_version}"
+            f"Tracking {len(active_files)} files. "
+            f"Ignored: {len(self.monitor.ignored_paths)}. Monitor v{current_version}"
         )
 
     # --- Message Handler ---
@@ -249,14 +237,12 @@ class FileApp(App[None]):
             f"on_data_table_row_selected triggered. Event row_key obj: {event.row_key!r}"
         )
 
-        # Make sure the event came from our main file table
         if event.control.id != "file-table":
             log.debug(
                 f"Ignoring RowSelected event from control id '{event.control.id}'"
             )
             return
 
-        # --- FIX: Use event.row_key.value ---
         row_key_obj: RowKey | None = event.row_key
         if row_key_obj is None or row_key_obj.value is None:
             log.error(
@@ -265,21 +251,15 @@ class FileApp(App[None]):
             self.notify("Could not identify selected row key value.", severity="error")
             return
 
-        # Get the actual path string from the RowKey's value
         path = str(row_key_obj.value)
-        # ------------------------------------
-
         log.debug(f"Showing details for selected path: {path}")
 
         try:
-            # Get the FileInfo object from the monitor using the correct path string
             file_info = self.monitor.files.get(path)
             if file_info:
-                # Push the imported DetailScreen
                 log.debug(f"Found FileInfo, pushing DetailScreen for {path}")
                 self.push_screen(DetailScreen(file_info))
             else:
-                # Handle case where file state might have changed since table update
                 log.warning(
                     f"File '{path}' (from row_key.value) not found in monitor state."
                 )
@@ -306,7 +286,6 @@ class FileApp(App[None]):
             self.notify("No row selected.", severity="warning")
             return
         try:
-            # Need to get the key value from the coordinate here too
             cell_key: CellKey | None = table.coordinate_to_cell_key(coordinate)
             row_key_obj = cell_key.row_key if cell_key else None
 
@@ -366,8 +345,8 @@ class FileApp(App[None]):
             log.debug("--- End Monitor State Dump ---")
             self.notify("Monitor state dumped to log (debug level).")
         except Exception as e:
-            log.exception("Error during monitor state dump.")
-            self.notify("Error dumping monitor state.", severity="error")
+            log.exception("Error during monitor state dump.", e)
+            self.notify(f"Error dumping monitor state. {e}", severity="error")
 
 
 # This main function is usually called by cli.py, but can be useful for testing
