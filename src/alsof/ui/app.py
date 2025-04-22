@@ -2,7 +2,6 @@
 """Main Textual application class for alsof."""
 
 import asyncio
-import functools
 import logging
 from collections import deque
 from typing import Callable, Dict, List, Union  # Added Dict
@@ -27,8 +26,6 @@ from .log_screen import LogScreen
 
 # Import WorkerCancelled if needed for more specific error handling
 # from textual.worker import WorkerCancelled
-
-
 
 
 # Define types imported from cli (or define them commonly)
@@ -423,11 +420,13 @@ class FileApp(App[None]):
             )
             self.monitor.ignore_all()
             # Trigger immediate table update after ignoring all
+            self.monitor.update()
             self.update_table()
             # Move cursor to top after clearing all
             table = self.query_one(DataTable)
             if table.row_count > 0:
                 table.move_cursor(row=0, animate=False)
+
             self.notify(f"Ignoring {count_before} currently tracked files.", timeout=2)
         except Exception as e:
             log.exception("Error ignoring all.")
