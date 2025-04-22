@@ -1,4 +1,4 @@
-# 🤖 `lsoph` - list open files using genai slop!
+# 📁 `lsoph`
 
 TUI that lists open files for a given process.
 
@@ -11,14 +11,18 @@ uvx lsoph -p <pid>
 * [🎬 demo](https://asciinema.org/a/c7T8id39jU7ap6E0D99S5dJ6F)
 * [🏠 home](https://bitplane.net/dev/python/lsoph)
 * [🐱 github](https://github.com/bitplane/lsoph)
-* [🐍 pypi](https://pypi.org/projects/lsoph)
+* [🐍 pypi](https://pypi.org/project/lsoph)
 
 ## Why?
-Because I thought it'd only take a couple of hours, and I'd heard good
-things about Gemini 2.5 Pro, so did it as a coding test.
 
-It descended into madness over the course of a weekend. Vibe coders,
-I never realised how bad you have it!
+Because I wanted this in a tmux panel, and decided to create it as GenAI slop!
+
+I'd heard good things about Gemini 2.5 Pro, and figured it'd only take a couple
+of hours. So did it as a coding test.
+
+It descended into madness over the course of a weekend, with input from ChatGPT
+and Claude to keep things moving. I do not recommend this; vibe coders, I never
+realised how bad you have it!
 
 ### Gemini 2.5 Pro
 
