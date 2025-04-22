@@ -1,30 +1,46 @@
+# Filename: app.py
 """Main Textual application class for alsof."""
 
 import asyncio
+import functools
 import logging
 from collections import deque
-from typing import Callable, List, Union
+from typing import Callable, Dict, List, Union  # Added Dict
 
+# Third-party imports
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.containers import Container
 from textual.coordinate import Coordinate
 from textual.reactive import reactive
 from textual.widgets import DataTable, Footer, Static
 from textual.widgets.data_table import CellKey, RowKey
 
-from alsof.monitor import Monitor, FileInfo
+# Local application imports
+from alsof.monitor import FileInfo, Monitor
 from alsof.util.short_path import short_path
 
+# Import the screen classes from their new locations
 from .detail_screen import DetailScreen
 from .log_screen import LogScreen
 
+# Import WorkerCancelled if needed for more specific error handling
+# from textual.worker import WorkerCancelled
+
+
+
+
+# Define types imported from cli (or define them commonly)
 BackendFuncType = Callable[[Union[List[int], List[str]], Monitor], None]
 BackendArgsType = Union[List[int], List[str]]
 BackendWorkerFuncType = Callable[[BackendFuncType, Monitor, BackendArgsType], None]
 
 
 log = logging.getLogger("alsof.app")
+
+
+# --- Main Application ---
 
 
 class FileApp(App[None]):
@@ -40,9 +56,19 @@ class FileApp(App[None]):
     ]
     CSS = """
     Screen { border: none; }
-    DataTable { height: 1fr; border: none; }
-    #status-bar { height: auto; dock: bottom; color: $text-muted; padding: 0 1; }
+    DataTable {
+        height: 1fr;
+        width: 1fr; /* Make table fill width */
+        border: none;
+    }
+    #status-bar {
+        height: auto;
+        dock: bottom;
+        color: $text-muted;
+        padding: 0 1;
+     }
 
+    /* Container styling for modal screens */
     LogScreen > Container {
         border: thick $accent; padding: 1; width: 80%; height: 80%; background: $surface;
     }
@@ -61,19 +87,10 @@ class FileApp(App[None]):
         backend_args: BackendArgsType,
         backend_worker_func: BackendWorkerFuncType,
     ):
-        """Initialize the FileApp.
-
-        Args:
-            monitor (Monitor): The file monitor instance.
-            log_queue (deque): The queue for log messages.
-            backend_func (BackendFuncType): The backend function (attach/run) to execute.
-            backend_args (BackendArgsType): The arguments for the backend function (pids/command).
-            backend_worker_func (BackendWorkerFuncType): The actual function to run in the worker.
-        """
+        """Initialize the FileApp."""
         super().__init__()
         self.monitor = monitor
         self.log_queue = log_queue
-        # Store backend info to start it later
         self._backend_func = backend_func
         self._backend_args = backend_args
         self._backend_worker_func = backend_worker_func
@@ -95,12 +112,13 @@ class FileApp(App[None]):
         """Runs the synchronous worker function in a thread using asyncio."""
         log.debug(f"Async wrapper starting task for {worker_func.__name__}")
         try:
-            # Use asyncio.to_thread to run the sync function in the event loop's thread pool
             await asyncio.to_thread(worker_func, backend_func, monitor, backend_args)
             log.debug(f"Async wrapper task for {worker_func.__name__} completed.")
+        # except WorkerCancelled: # Catch specific cancellation if needed
+        #     log.info(f"Background worker {worker_func.__name__} cancelled.")
         except Exception:
+            # Log exceptions from the worker thread
             log.exception(f"Exception in background worker {worker_func.__name__}")
-            # Optionally notify the user about the background error
             # self.notify("Background task failed", severity="error", timeout=5)
 
     def on_mount(self) -> None:
@@ -141,7 +159,7 @@ class FileApp(App[None]):
             status_bar = self.query_one("#status-bar", Static)
             status_bar.update(text)
         except Exception:
-            pass  # Ignore errors if status bar not found
+            pass
 
     def _get_emoji_for_file(self, info: FileInfo) -> str:
         """Determines the appropriate emoji based on file status and activity."""
@@ -212,8 +230,10 @@ class FileApp(App[None]):
         log.debug(f"update_table: Processing {len(active_files)} active files.")
 
         selected_path_key = None
+        current_cursor_row = -1
         coordinate: Coordinate | None = table.cursor_coordinate
         if table.is_valid_coordinate(coordinate):
+            current_cursor_row = coordinate.row
             try:
                 cell_key: CellKey | None = table.coordinate_to_cell_key(coordinate)
                 selected_path_key = cell_key.row_key if cell_key else None
@@ -223,15 +243,17 @@ class FileApp(App[None]):
 
         table.clear()
         row_keys_added_this_update = set()
+        new_row_key_map: Dict[RowKey, int] = {}
 
-        for info in active_files:
-            row_key_value = info.path  # This is the actual path string
+        for idx, info in enumerate(active_files):
+            row_key_value = info.path
             if row_key_value in row_keys_added_this_update:
                 log.warning(
                     f"Skipping duplicate path in update_table loop: {row_key_value}"
                 )
                 continue
             row_keys_added_this_update.add(row_key_value)
+            new_row_key_map[row_key_value] = idx
 
             emoji = self._get_emoji_for_file(info)
             path_display = short_path(info.path, available_width)
@@ -264,27 +286,22 @@ class FileApp(App[None]):
                 Text(path_display, style=style),
             )
             try:
-                # Use the actual path string as the key value for the row
                 table.add_row(*row_data, key=row_key_value)
             except Exception as add_exc:
                 log.exception(f"Error adding row for key {row_key_value}: {add_exc}")
 
+        # --- Restore Cursor ---
         new_row_index = -1
-        if selected_path_key is not None and selected_path_key in table.rows:
-            try:
-                new_row_index = table.get_row_index(selected_path_key)
-            except Exception as e:
-                log.debug(
-                    f"Error getting new row index for key '{selected_path_key}': {e}"
-                )
-                new_row_index = -1
+        if selected_path_key is not None:
+            new_row_index = new_row_key_map.get(selected_path_key, -1)
 
-        if new_row_index != -1 and new_row_index < table.row_count:
+        if new_row_index != -1:
             table.move_cursor(row=new_row_index, animate=False)
-        elif table.row_count > 0 and (selected_path_key is None or new_row_index == -1):
-            current_cursor_row, _ = table.cursor_coordinate
-            if current_cursor_row != 0:
-                table.move_cursor(row=0, animate=False)
+        elif current_cursor_row != -1 and table.row_count > 0:
+            new_cursor_row = min(current_cursor_row, table.row_count - 1)
+            table.move_cursor(row=new_cursor_row, animate=False)
+        elif table.row_count > 0:
+            table.move_cursor(row=0, animate=False)
 
         status_bar.update(
             f"Tracking {len(active_files)} files. Ignored: {len(self.monitor.ignored_paths)}. Monitor v{current_version}"
@@ -310,7 +327,6 @@ class FileApp(App[None]):
             self.notify("Could not identify selected row key value.", severity="error")
             return
 
-        # Get the actual path string from the RowKey's value attribute
         path = str(row_key_obj.value)
         log.debug(f"Showing details for selected path: {path}")
         try:
@@ -334,7 +350,21 @@ class FileApp(App[None]):
     # --- Actions ---
     def action_quit(self) -> None:
         """Action to quit the application."""
-        self.exit()
+        log.info("Quit action triggered. Cancelling workers...")
+        # --- FIX: Use self.workers to cancel ---
+        # Iterate over a copy of the workers list
+        workers_to_cancel = list(self.workers)
+        if workers_to_cancel:
+            log.debug(f"Attempting to cancel {len(workers_to_cancel)} worker(s)...")
+            for worker in workers_to_cancel:
+                # worker.cancel() returns immediately, cancellation happens asynchronously
+                worker.cancel()
+                log.debug(f"Cancellation requested for worker: {worker.name}")
+        else:
+            log.debug("No active workers found to cancel.")
+        # ---------------------------------------
+        log.info("Exiting application.")
+        self.exit()  # self.exit() will handle shutdown after current events process
 
     def action_ignore_selected(self) -> None:
         """Action to ignore the currently selected file path."""
@@ -343,15 +373,38 @@ class FileApp(App[None]):
         if not table.is_valid_coordinate(coordinate):
             self.notify("No row selected.", severity="warning")
             return
+
+        original_row_index = coordinate.row
+
         try:
             cell_key: CellKey | None = table.coordinate_to_cell_key(coordinate)
             row_key_obj = cell_key.row_key if cell_key else None
 
             if row_key_obj is not None and row_key_obj.value is not None:
-                # Use .value here too
                 path_to_ignore = str(row_key_obj.value)
                 log.info(f"Ignoring selected path: {path_to_ignore}")
                 self.monitor.ignore(path_to_ignore)
+
+                # Trigger immediate table update after ignoring
+                self.update_table()
+
+                # Try to move cursor after table update
+                if table.row_count > 0:
+                    new_cursor_row = max(0, original_row_index - 1)
+                    new_cursor_row = min(new_cursor_row, table.row_count - 1)
+                    # Check if the target row is valid before moving
+                    if table.is_valid_row_index(new_cursor_row):
+                        table.move_cursor(row=new_cursor_row, animate=False)
+                        log.debug(
+                            f"Moved cursor to row {new_cursor_row} after ignoring."
+                        )
+                    else:
+                        log.debug(
+                            f"Target row {new_cursor_row} invalid after ignore, cursor not moved."
+                        )
+                else:
+                    log.debug("Table empty after ignore, cursor not moved.")
+
                 self.notify(f"Ignored: {short_path(path_to_ignore, 60)}", timeout=2)
             else:
                 self.notify(
@@ -369,6 +422,12 @@ class FileApp(App[None]):
                 [fi for fi in self.monitor if fi.path not in self.monitor.ignored_paths]
             )
             self.monitor.ignore_all()
+            # Trigger immediate table update after ignoring all
+            self.update_table()
+            # Move cursor to top after clearing all
+            table = self.query_one(DataTable)
+            if table.row_count > 0:
+                table.move_cursor(row=0, animate=False)
             self.notify(f"Ignoring {count_before} currently tracked files.", timeout=2)
         except Exception as e:
             log.exception("Error ignoring all.")
@@ -404,6 +463,3 @@ class FileApp(App[None]):
         except Exception as e:
             log.exception("Error during monitor state dump.")
             self.notify("Error dumping monitor state.", severity="error")
-
-
-# Removed the standalone main function

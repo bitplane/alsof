@@ -1,7 +1,7 @@
 # Filename: strace_cmd.py
 
 import contextlib
-import logging  # Keep logging import
+import logging
 import os
 import re
 import shlex
@@ -14,12 +14,14 @@ from dataclasses import dataclass
 
 import psutil
 
-# --- Setup Logging ---
-# REMOVED: logging.basicConfig(...)
-log = logging.getLogger(__name__)  # Get logger instance
+# --- ADDED: Import Monitor for type hint ---
+from alsof.monitor import Monitor
 
-# --- Constants and Config ---
-# ... (rest of the constants remain the same) ...
+# -----------------------------------------
+
+log = logging.getLogger(__name__)
+
+# --- Constants, Dataclasses, Helpers (Keep as is) ---
 PROCESS_SYSCALLS = ["clone", "fork", "vfork"]
 FILE_STRUCT_SYSCALLS = [
     "open",
@@ -56,7 +58,6 @@ STRACE_LINE_RE = re.compile(
 )
 
 
-# --- Data Structures ---
 @dataclass
 class Syscall:
     timestamp: float
@@ -69,12 +70,8 @@ class Syscall:
     error_msg: str | None = None
 
 
-# --- Parsing Helpers ---
-# ... (Implementations of _parse_args_state_machine, _parse_result_int remain the same) ...
 def _parse_args_state_machine(args_str: str) -> list[str]:
     args = []
-    if not args_str:
-        return args
     current_arg = ""
     nesting_level = 0
     in_quotes = False
@@ -113,11 +110,10 @@ def _parse_result_int(result_str: str) -> int | None:
     try:
         return int(result_str, 0)
     except ValueError:
+        log.warning(f"Could not parse result string: '{result_str}'")
         return None
 
 
-# --- Temporary FIFO ---
-# ... (Implementation of temporary_fifo remains the same) ...
 @contextlib.contextmanager
 def temporary_fifo() -> Iterator[str]:
     fifo_path = None
@@ -139,18 +135,15 @@ def temporary_fifo() -> Iterator[str]:
 
 
 # --- Low-level Strace Output Streamer ---
-# ... (Implementation of stream_strace_output remains the same,
-#      including the enhanced error logging in the finally block) ...
 def stream_strace_output(
+    monitor: Monitor,  # <--- ADD Monitor argument
     target_command: list[str] | None = None,
     attach_ids: list[int] | None = None,
     syscalls: list[str] = DEFAULT_SYSCALLS,
 ) -> Iterator[str]:
     """
-    Runs strace (either launching or attaching) and yields raw output lines from FIFO.
-    Handles process startup, termination, and errors. Enhanced error logging.
+    Runs strace, yields output lines, stores strace PID in monitor.
     """
-    # --- Initial checks and setup (Keep as is) ---
     if not target_command and not attach_ids:
         raise ValueError("Must provide either target_command or attach_ids.")
     if target_command and attach_ids:
@@ -163,15 +156,16 @@ def stream_strace_output(
 
     proc: subprocess.Popen | None = None
     fifo_reader = None
-    strace_pid = -1  # Store strace PID for logging
+    strace_pid = -1
+    monitor.backend_pid = None  # Ensure it's clear initially
 
     try:
         with temporary_fifo() as fifo_path:
+            # ... (construct strace_command as before) ...
             strace_command = [strace_path, *STRACE_BASE_OPTIONS]
             if syscalls:
                 strace_command.extend(["-e", f"trace={','.join(syscalls)}"])
             strace_command.extend(["-o", fifo_path])
-
             if target_command:
                 strace_command.extend(["--", *target_command])
                 log.info(
@@ -187,9 +181,6 @@ def stream_strace_output(
                 log.info(f"Preparing to attach to existing IDs: {valid_attach_ids}")
 
             log.info(f"Executing: {' '.join(shlex.quote(c) for c in strace_command)}")
-            # Add delay here if testing the timing hypothesis (keep commented out otherwise)
-            # import time # Make sure time is imported if using sleep
-            # time.sleep(1)
             proc = subprocess.Popen(
                 strace_command,
                 stdout=subprocess.DEVNULL,
@@ -198,17 +189,17 @@ def stream_strace_output(
                 encoding="utf-8",
                 errors="replace",
             )
-            strace_pid = proc.pid  # Store PID after launch
+            strace_pid = proc.pid
+            monitor.backend_pid = strace_pid  # <--- STORE PID in monitor
+            log.info(f"Strace started with PID: {strace_pid}")
 
-            time.sleep(0.1)  # Keep small delay to check for immediate exit
+            # ... (rest of try block: check immediate exit, open fifo, yield lines) ...
+            time.sleep(0.1)
             proc_status = proc.poll()
             if proc_status is not None:
                 stderr_output = proc.stderr.read() if proc.stderr else ""
-                # Ensure strace_pid is set before raising
                 raise RuntimeError(
-                    f"Strace process (PID {strace_pid if strace_pid != -1 else 'unknown'}) "
-                    f"exited immediately (code {proc_status}). "
-                    f"Stderr: {stderr_output[:500]}"
+                    f"Strace process (PID {strace_pid}) exited immediately (code {proc_status}). Stderr: {stderr_output[:500]}"
                 )
 
             log.info(
@@ -225,14 +216,11 @@ def stream_strace_output(
                 )
                 if proc_status is not None:
                     raise RuntimeError(
-                        f"Strace process (PID {strace_pid}) exited (code {proc_status}) "
-                        f"before FIFO could be read.{stderr_msg} Error: {e}"
+                        f"Strace process (PID {strace_pid}) exited (code {proc_status}) before FIFO could be read.{stderr_msg} Error: {e}"
                     ) from e
                 else:
                     raise RuntimeError(
-                        f"Failed to open FIFO '{fifo_path}' for reading "
-                        f"while strace (PID {strace_pid}) is running.{stderr_msg} "
-                        f"Error: {e}"
+                        f"Failed to open FIFO '{fifo_path}' for reading while strace (PID {strace_pid}) is running.{stderr_msg} Error: {e}"
                     ) from e
 
             if fifo_reader:
@@ -245,22 +233,18 @@ def stream_strace_output(
                 log.warning("FIFO reader was not available after open attempt.")
 
     except FileNotFoundError as e:
-        cmd_name = target_command[0] if target_command else "attach target"
-        log.error(
-            f"Command not found: {e}. Check 'strace' and '{shlex.quote(cmd_name)}' are in PATH and executable."
-        )
+        log.error(f"Command not found: {e}.")
         raise
     except Exception as e:
-        # Log exceptions happening during the main execution phase
         log.exception(
             f"An error occurred during strace execution or setup (PID {strace_pid}): {e}"
         )
-        raise  # Re-raise critical exceptions
+        raise
     finally:
-        # This block executes even if exceptions occurred above
         log.info(
             f"Cleaning up stream_strace_output (strace PID: {strace_pid if strace_pid != -1 else 'unknown'})..."
         )
+        monitor.backend_pid = None  # <--- CLEAR PID on exit/cleanup
         if fifo_reader:
             try:
                 fifo_reader.close()
@@ -268,65 +252,44 @@ def stream_strace_output(
             except Exception as close_err:
                 log.warning(f"Error closing FIFO reader during cleanup: {close_err}")
 
-        # --- Enhanced Exit Code / Stderr Handling ---
         if proc:
+            # ... (Keep the enhanced exit code / stderr handling from previous version) ...
             exit_code = proc.poll()
-            # If process hasn't terminated yet (e.g., generator stopped early), wait for it.
             if exit_code is None:
                 log.info(
                     f"Waiting for strace process (PID {strace_pid}) to terminate..."
                 )
                 try:
-                    # Use communicate to read remaining stderr/stdout and wait
-                    # Set timeout for communicate
                     _, stderr_output_rem = proc.communicate(timeout=1.0)
-                    exit_code = proc.returncode  # Get final exit code
+                    exit_code = proc.returncode
                 except subprocess.TimeoutExpired:
                     log.warning(
                         f"Strace process (PID {strace_pid}) did not exit after communicate timeout, killing."
                     )
                     proc.kill()
-                    # Try reading stderr after kill, might be empty
                     stderr_output_rem = proc.stderr.read() if proc.stderr else ""
-                    exit_code = proc.wait()  # Get exit code after kill
+                    exit_code = proc.wait()
                 except Exception as comm_err:
                     log.exception(
                         f"Error during process communication/wait for PID {strace_pid}: {comm_err}"
                     )
-                    # Try to get exit code if possible, otherwise assume error
-                    exit_code = (
-                        proc.poll() if proc.poll() is not None else 1
-                    )  # Assume error if poll fails
-                    stderr_output_rem = ""  # Can't reliably read stderr
+                    exit_code = proc.poll() if proc.poll() is not None else 1
+                    stderr_output_rem = ""
             else:
-                # Process already exited, read any remaining stderr directly
                 stderr_output_rem = proc.stderr.read() if proc.stderr else ""
-
-            # Combine any stderr read before with remaining stderr
-            # This part might be redundant if communicate was used, but safe fallback
-            stderr_output = (
-                stderr_output_rem  # Prioritize stderr read after termination/wait
-            )
-
-            # Close stderr stream if it's still open
+            stderr_output = stderr_output_rem
             if proc.stderr and not proc.stderr.closed:
                 proc.stderr.close()
 
-            # Log based on exit code
             if exit_code is not None and exit_code != 0 and exit_code != 130:
-                # --- Log non-zero exits (like 1) as ERROR ---
                 log.error(
-                    f"Strace process (PID {strace_pid}) failed with exit code {exit_code}.\n"
-                    f"Stderr: {stderr_output.strip() if stderr_output else '<empty>'}"
+                    f"Strace process (PID {strace_pid}) failed with exit code {exit_code}.\nStderr: {stderr_output.strip() if stderr_output else '<empty>'}"
                 )
             else:
-                # Log successful exit or Ctrl+C
                 log.info(
                     f"Strace process (PID {strace_pid}) finished with exit code {exit_code}."
                 )
-                # Optionally log non-error stderr here if needed
                 if stderr_output and stderr_output.strip():
-                    # Demote common attach messages
                     is_attach_msg = (
                         "ptrace(PTRACE_ATTACH" in stderr_output
                         or "ptrace(PTRACE_SEIZE" in stderr_output
@@ -339,10 +302,8 @@ def stream_strace_output(
                         log.debug(
                             "Strace stderr contained only standard attach/seize messages."
                         )
-        # --- End Enhanced Handling ---
 
-        # Final check to terminate strace process if it somehow still runs (e.g. error during cleanup)
-        if proc and proc.poll() is None:
+        if proc and proc.poll() is None:  # Final check
             log.warning(
                 f"Terminating potentially running strace process (PID {proc.pid}) on final cleanup check..."
             )
@@ -360,27 +321,25 @@ def stream_strace_output(
 
 
 # --- Generator: Parsing the Stream ---
-# ... (Implementation of parse_strace_stream remains the same) ...
 def parse_strace_stream(
+    monitor: Monitor,  # <--- ADD Monitor argument
     target_command: list[str] | None = None,
     attach_ids: list[int] | None = None,
     syscalls: list[str] = DEFAULT_SYSCALLS,
 ) -> Iterator[Syscall]:
     """
-    Runs strace (launch or attach) via stream_strace_output, parses the raw lines
-    into Syscall objects, and resolves TIDs to PIDs (TGIDs).
+    Runs strace via stream_strace_output, parses lines into Syscall objects.
     """
-    # (Keep the implementation of this function exactly as it was)
+    # ... (Initial checks, map setup, combined_syscalls remain the same) ...
     if not target_command and not attach_ids:
         raise ValueError("Must provide either target_command or attach_ids.")
     if target_command and attach_ids:
         raise ValueError("Cannot provide both target_command and attach_ids.")
-
     log.info("Starting parse_strace_stream...")
     tid_to_pid_map: dict[int, int] = {}
-
     if attach_ids:
         log.info(f"Pre-populating TID->PID map for attach IDs: {attach_ids}")
+        # ... (map population logic remains the same) ...
         for initial_tid in attach_ids:
             try:
                 if not psutil.pid_exists(initial_tid):
@@ -412,10 +371,15 @@ def parse_strace_stream(
     )
 
     try:
-        for line in stream_strace_output(target_command, attach_ids, combined_syscalls):
+        # --- Pass monitor down ---
+        for line in stream_strace_output(
+            monitor, target_command, attach_ids, combined_syscalls
+        ):
+            # ... (rest of parsing loop remains the same) ...
             timestamp = time.time()
             match = STRACE_LINE_RE.match(line.strip())
             if not match:
+                # ... (ignore unfinished/resumed/exit lines) ...
                 if " <unfinished ...>" in line:
                     log.debug(f"Ignoring unfinished strace line: {line.strip()}")
                 elif " resumed> " in line:
@@ -427,7 +391,6 @@ def parse_strace_stream(
                 else:
                     log.debug(f"Unmatched strace line: {line.strip()}")
                 continue
-
             data = match.groupdict()
             try:
                 tid = int(data["tid"])
@@ -438,11 +401,10 @@ def parse_strace_stream(
                 error_msg = data.get("errmsg")
                 pid = tid_to_pid_map.get(tid)
                 if pid is None:
-                    pid = tid  # Rely on _process_syscall_event fallback lookup
+                    pid = tid
                     log.debug(
                         f"TID {tid} appeared without prior mapping. Will attempt lookup."
                     )
-
                 parsed_args_list = _parse_args_state_machine(args_str)
                 yield Syscall(
                     timestamp=timestamp,

@@ -5,13 +5,11 @@ import os
 import shlex
 import sys
 from collections import deque
-from typing import Callable, List, Union  # For type hinting
+from typing import Callable, List, Union
 
-from alsof.backend import lsof, strace
+from alsof.backend import lsof, psutil, strace
 from alsof.monitor import Monitor
-
-# Import the app class itself
-from alsof.ui.app import FileApp  # Assuming app.py contains FileApp
+from alsof.ui.app import FileApp
 
 # Define the type for backend functions and arguments
 BackendFuncType = Callable[[Union[List[int], List[str]], Monitor], None]
@@ -55,7 +53,11 @@ class TextualLogHandler(logging.Handler):
 # Get root logger instance ONCE
 log = logging.getLogger("alsof.cli")
 
-BACKENDS = {"strace": (strace.attach, strace.run), "lsof": (lsof.attach, lsof.run)}
+BACKENDS = {
+    "strace": (strace.attach, strace.run),
+    "lsof": (lsof.attach, lsof.run),
+    "psutil": (psutil.attach, psutil.run),
+}
 DEFAULT_BACKEND = list(BACKENDS)[0]
 
 

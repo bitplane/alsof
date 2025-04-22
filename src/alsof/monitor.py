@@ -1,19 +1,24 @@
 import logging
+import os
 import time
 from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from typing import Any, Dict, Set  # Added Dict, Any, Set for type hints
 
 from alsof.util.versioned import Versioned, changes, waits
 
-log = logging.getLogger("alsof.monitor")
+# --- Setup Logging ---
+log = logging.getLogger("alsof.monitor")  # Use package-aware logger name
 
+# --- Constants ---
 STDIN_PATH = "<STDIN>"
 STDOUT_PATH = "<STDOUT>"
 STDERR_PATH = "<STDERR>"
 STD_PATHS = {STDIN_PATH, STDOUT_PATH, STDERR_PATH}
 
 
+# --- File State Information ---
 @dataclass
 class FileInfo:
     """Holds state information about a single tracked file."""
@@ -21,17 +26,22 @@ class FileInfo:
     path: str
     status: str = "unknown"
     last_activity_ts: float = field(default_factory=time.time)
-    open_by_pids: dict[int, set[int]] = field(default_factory=dict)
+    open_by_pids: Dict[int, Set[int]] = field(
+        default_factory=dict
+    )  # Key: pid, Value: set[fd]
     last_event_type: str = ""
     last_error_enoent: bool = False
     recent_event_types: deque[str] = field(default_factory=lambda: deque(maxlen=5))
-    event_history: deque[dict] = field(default_factory=lambda: deque(maxlen=100))
+    event_history: deque[Dict[str, Any]] = field(
+        default_factory=lambda: deque(maxlen=100)
+    )
     bytes_read: int = 0
     bytes_written: int = 0
-    details: dict[str, any] = field(default_factory=dict)
+    details: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def is_open(self) -> bool:
+        """Checks if any process currently holds this file open according to state."""
         return bool(self.open_by_pids)
 
 
@@ -44,11 +54,19 @@ class Monitor(Versioned):
     """
 
     def __init__(self, identifier: str):
+        """Initialize the Monitor.
+
+        Args:
+            identifier: A string identifying the monitoring session (e.g., command or PIDs).
+        """
         super().__init__()
         self.identifier = identifier
-        self.ignored_paths: set[str] = set()
-        self.pid_fd_map: dict[int, dict[int, str]] = {}
-        self.files: dict[str, FileInfo] = {}
+        self.ignored_paths: Set[str] = set()
+        self.pid_fd_map: Dict[int, Dict[int, str]] = {}  # PID -> FD -> Path
+        self.files: Dict[str, FileInfo] = {}  # Path -> FileInfo
+        # --- ADDED: Store the PID of the backend process (e.g., strace) ---
+        self.backend_pid: int | None = None
+        # -----------------------------------------------------------------
         log.info(f"Initialized Monitor for identifier: '{identifier}'")
 
     def _cache_info(self, path: str, timestamp: float) -> FileInfo | None:
@@ -88,7 +106,7 @@ class Monitor(Versioned):
             if not info.recent_event_types or info.recent_event_types[-1] != event_type:
                 info.recent_event_types.append(event_type)
 
-    # --- Public Handler Methods (Keep implementations as they were) ---
+    # --- Public Handler Methods ---
     @changes
     def ignore(self, path: str):
         """Adds a path to the ignore list (in-memory only)."""
@@ -179,9 +197,7 @@ class Monitor(Versioned):
                     del self.pid_fd_map[pid]
             else:
                 log.warning(
-                    f"Close success for PID {pid} FD {fd}, "
-                    f"but map pointed to '{mapped_path}' "
-                    f"instead of expected '{path}'. Map not removed."
+                    f"Close success for PID {pid} FD {fd}, but map pointed to '{mapped_path}' instead of expected '{path}'. Map not removed."
                 )
 
         if not path or path in STD_PATHS:
@@ -198,8 +214,7 @@ class Monitor(Versioned):
         info = self.files.get(path)
         if not info:
             log.warning(
-                f"Close event for PID {pid} FD {fd} "
-                f"refers to path '{path}' not in state. No FileInfo update."
+                f"Close event for PID {pid} FD {fd} refers to path '{path}' not in state. No FileInfo update."
             )
             return
 
