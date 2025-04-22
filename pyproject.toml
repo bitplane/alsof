@@ -11,7 +11,7 @@ requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: Public Domain", # WTFPL
-    "Operating System :: Linux",
+    "Operating System :: POSIX :: Linux",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 
@@ -30,6 +30,11 @@ dev = [
     "build",
     "twine"
 ]
+
+[project.urls]
+"Homepage" = "https://bitplane.net/dev/python/lsoph"
+"Source Code" = "https://github.com/bitplane/lsoph"
+"Bug Tracker" = "https://github.com/bitplane/lsoph/issues"
 
 [build-system]
 build-backend = "flit_core.buildapi"
