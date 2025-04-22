@@ -63,3 +63,8 @@ I never realised how bad you have it!
 
 In the kingdom of the token generators, the one-eyed Claude is king.
 
+## Links
+
+* [🏠 home](https://bitplane.net/dev/python/lsoph)
+* [🐱 github](https://githube.com/bitplane/lsoph)
+* [🐍 pypi](https://pypi.org/projects/lsoph)
