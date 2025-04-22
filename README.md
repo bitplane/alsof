@@ -2,11 +2,16 @@
 
 TUI that lists open files for a given process.
 
-usage:
+Usage:
 
 ```shell
-uvx lsoph
+uvx lsoph -p <pid>
 ```
+
+* [🎬 demo](https://asciinema.org/a/c7T8id39jU7ap6E0D99S5dJ6F)
+* [🏠 home](https://bitplane.net/dev/python/lsoph)
+* [🐱 github](https://githube.com/bitplane/lsoph)
+* [🐍 pypi](https://pypi.org/projects/lsoph)
 
 ## Why?
 Because I thought it'd only take a couple of hours, and I'd heard good
@@ -63,8 +68,9 @@ I never realised how bad you have it!
 
 In the kingdom of the token generators, the one-eyed Claude is king.
 
-## Links
+## License
 
-* [🏠 home](https://bitplane.net/dev/python/lsoph)
-* [🐱 github](https://githube.com/bitplane/lsoph)
-* [🐍 pypi](https://pypi.org/projects/lsoph)
+WTFPL with one additional clause:
+
+* ⛔ DON'T BLAME ME
+
