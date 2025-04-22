@@ -1,4 +1,4 @@
-"""Utility functions for alsof."""
+"""Utility functions for lsoph."""
 
 import logging
 import os
@@ -10,7 +10,7 @@ log = logging.getLogger(__name__)
 CWD = os.getcwd()
 if not CWD.endswith(os.sep):
     CWD += os.sep
-log.debug(f"alsof CWD stored as: {CWD}")  # Keep this initial log
+log.debug(f"lsoph CWD stored as: {CWD}")  # Keep this initial log
 
 
 def _relative_path(path: str, cwd: str = CWD) -> str:

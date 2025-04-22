@@ -2,8 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import alsof.util.short_path
-from alsof.util.short_path import short_path
+import lsoph.util.short_path
+from lsoph.util.short_path import short_path
 
 
 def make_mock_os(sep):
@@ -21,14 +21,14 @@ def make_mock_os(sep):
 @pytest.fixture
 def posix(monkeypatch):
     mock_os = make_mock_os("/")
-    monkeypatch.setattr(alsof.util.short_path, "os", mock_os)
+    monkeypatch.setattr(lsoph.util.short_path, "os", mock_os)
     yield
 
 
 @pytest.fixture
 def windows(monkeypatch):
     mock_os = make_mock_os("\\")
-    monkeypatch.setattr(alsof.util.short_path, "os", mock_os)
+    monkeypatch.setattr(lsoph.util.short_path, "os", mock_os)
     yield
 
 

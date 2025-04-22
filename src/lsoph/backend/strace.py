@@ -10,19 +10,19 @@ from collections.abc import Callable, Iterator  # Use collections.abc
 import psutil
 
 # Assuming these are correctly defined in strace_cmd
-from alsof.backend.strace_cmd import (
+from lsoph.backend.strace_cmd import (
     DEFAULT_SYSCALLS,
     EXIT_SYSCALLS,
     PROCESS_SYSCALLS,
     Syscall,
     parse_strace_stream,
 )
-from alsof.monitor import Monitor
+from lsoph.monitor import Monitor
 
 # Assuming this utility exists and works
-from alsof.util.pid import get_cwd as pid_get_cwd
+from lsoph.util.pid import get_cwd as pid_get_cwd
 
-log = logging.getLogger("alsof.strace")
+log = logging.getLogger("lsoph.strace")
 
 # --- Helper Functions ---
 
@@ -473,11 +473,11 @@ def run(command: list[str], monitor: Monitor, syscalls: list[str] = DEFAULT_SYSC
     tid_to_pid_map: dict[int, int] = {}
     pid_cwd_map: dict[int, str] = {}
     try:
-        initial_alsof_cwd = os.getcwd()
-        log.info(f"alsof initial CWD: {initial_alsof_cwd}")
+        initial_lsoph_cwd = os.getcwd()
+        log.info(f"lsoph initial CWD: {initial_lsoph_cwd}")
     except OSError as e:
-        log.error(f"Could not get alsof's initial CWD: {e}")
-        initial_alsof_cwd = None
+        log.error(f"Could not get lsoph's initial CWD: {e}")
+        initial_lsoph_cwd = None
     log.info("Starting run loop...")
     try:
         combined_syscalls = sorted(
@@ -507,7 +507,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Strace adapter (Test): runs/attaches strace and updates Monitor state.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Examples:\n  python3 -m alsof.strace -c find . -maxdepth 1\n  sudo python3 -m alsof.strace -p 1234",
+        epilog="Examples:\n  python3 -m lsoph.strace -c find . -maxdepth 1\n  sudo python3 -m lsoph.strace -p 1234",
     )
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument(
@@ -564,7 +564,7 @@ def main(argv: list[str] | None = None) -> int:
 
     monitor = Monitor(identifier=monitor_id)
 
-    # --- Corrected try block from artifact alsof_strace_backend_main_fix ---
+    # --- Corrected try block from artifact lsoph_strace_backend_main_fix ---
     try:
         if target_command:
             run(target_command, monitor)

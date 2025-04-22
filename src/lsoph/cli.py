@@ -7,9 +7,9 @@ import sys
 from collections import deque
 from typing import Callable, List, Union
 
-from alsof.backend import lsof, psutil, strace
-from alsof.monitor import Monitor
-from alsof.ui.app import FileApp
+from lsoph.backend import lsof, psutil, strace
+from lsoph.monitor import Monitor
+from lsoph.ui.app import FileApp
 
 # Define the type for backend functions and arguments
 BackendFuncType = Callable[[Union[List[int], List[str]], Monitor], None]
@@ -51,7 +51,7 @@ class TextualLogHandler(logging.Handler):
 
 
 # Get root logger instance ONCE
-log = logging.getLogger("alsof.cli")
+log = logging.getLogger("lsoph.cli")
 
 BACKENDS = {
     "strace": (strace.attach, strace.run),
@@ -70,7 +70,7 @@ def run_backend_worker(
     """Target function to run the selected backend in a background worker/thread."""
     # Use a logger specific to the backend execution context
     # Note: This logger will inherit handlers from the root logger configured in main()
-    worker_log = logging.getLogger(f"alsof.backend.{backend_func.__module__}")
+    worker_log = logging.getLogger(f"lsoph.backend.{backend_func.__module__}")
     try:
         worker_log.info("Starting backend function in background worker...")
         backend_func(target_args, monitor_instance)
@@ -89,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Monitors file access for a command or process.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"Available backends: {', '.join(BACKENDS.keys())}\n"
-        "Example: alsof -b strace -- find . -maxdepth 1",
+        "Example: lsoph -b strace -- find . -maxdepth 1",
     )
     parser.add_argument(
         "-b",

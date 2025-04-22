@@ -1,5 +1,5 @@
 # Filename: app.py
-"""Main Textual application class for alsof."""
+"""Main Textual application class for lsoph."""
 
 import asyncio
 import logging
@@ -17,8 +17,8 @@ from textual.widgets import DataTable, Footer, Static
 from textual.widgets.data_table import CellKey, RowKey
 
 # Local application imports
-from alsof.monitor import FileInfo, Monitor
-from alsof.util.short_path import short_path
+from lsoph.monitor import FileInfo, Monitor
+from lsoph.util.short_path import short_path
 
 # Import the screen classes from their new locations
 from .detail_screen import DetailScreen
@@ -34,7 +34,7 @@ BackendArgsType = Union[List[int], List[str]]
 BackendWorkerFuncType = Callable[[BackendFuncType, Monitor, BackendArgsType], None]
 
 
-log = logging.getLogger("alsof.app")
+log = logging.getLogger("lsoph.app")
 
 
 # --- Main Application ---
@@ -43,7 +43,7 @@ log = logging.getLogger("alsof.app")
 class FileApp(App[None]):
     """Textual file monitor application."""
 
-    TITLE = "alsof - Another lsof"
+    TITLE = "lsoph - Another lsof"
     BINDINGS = [
         Binding("q,escape", "quit", "Quit", show=True),
         Binding("x", "ignore_all", "Ignore All", show=True),

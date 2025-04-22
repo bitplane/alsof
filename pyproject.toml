@@ -1,5 +1,5 @@
 [project]
-name = "alsof"
+name = "lsoph"
 description = "An interactive lsof alternative"
 version = "0.0.1"
 authors = [
@@ -36,7 +36,7 @@ build-backend = "flit_core.buildapi"
 requires = ["flit_core >=3.2,<4"]
 
 [project.scripts]
-alsof = "alsof.cli:main"
+lsoph = "lsoph.cli:main"
 
 [tool.isort]
 profile = "black"

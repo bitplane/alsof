@@ -6,10 +6,10 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any, Dict, Set  # Added Dict, Any, Set for type hints
 
-from alsof.util.versioned import Versioned, changes, waits
+from lsoph.util.versioned import Versioned, changes, waits
 
 # --- Setup Logging ---
-log = logging.getLogger("alsof.monitor")  # Use package-aware logger name
+log = logging.getLogger("lsoph.monitor")  # Use package-aware logger name
 
 # --- Constants ---
 STDIN_PATH = "<STDIN>"

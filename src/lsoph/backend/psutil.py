@@ -8,10 +8,10 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import psutil
 
-from alsof.monitor import Monitor
+from lsoph.monitor import Monitor
 
 # Setup logging
-log = logging.getLogger("alsof.backend.psutil")
+log = logging.getLogger("lsoph.backend.psutil")
 
 
 class PsutilBackend:

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 import psutil
 
 # --- ADDED: Import Monitor for type hint ---
-from alsof.monitor import Monitor
+from lsoph.monitor import Monitor
 
 # -----------------------------------------
 

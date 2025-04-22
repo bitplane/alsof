@@ -88,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
     Command-line entry point for testing pid functions.
     """
     # --- Setup logging here ONLY for standalone script execution ---
-    # This allows running `python -m alsof.util.pid ...` with logging
+    # This allows running `python -m lsoph.util.pid ...` with logging
     # It won't interfere when imported as a module by cli.py
     parser = argparse.ArgumentParser(
         description="Test PID utilities: List descendants or get CWD.",

@@ -5,15 +5,15 @@ import subprocess
 import time
 from typing import Dict, Iterator, List, Optional, Set, Tuple
 
-from alsof.monitor import Monitor
-from alsof.util.pid import get_descendants
+from lsoph.monitor import Monitor
+from lsoph.util.pid import get_descendants
 
 # Setup logging - using the same pattern as other modules
 logging.basicConfig(
     level=os.environ.get("LOGLEVEL", "WARNING").upper(),
     format="%(levelname)s:%(name)s:%(message)s",
 )
-log = logging.getLogger("alsof.backend.lsof")  # Use package-aware logger name
+log = logging.getLogger("lsoph.backend.lsof")  # Use package-aware logger name
 
 # Regular expressions for parsing lsof output
 # Format: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME

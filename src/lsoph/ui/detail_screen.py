@@ -11,8 +11,8 @@ from textual.containers import Container
 from textual.screen import ModalScreen
 from textual.widgets import Label, RichLog
 
-from alsof.monitor import FileInfo
-from alsof.util.short_path import short_path
+from lsoph.monitor import FileInfo
+from lsoph.util.short_path import short_path
 
 log = logging.getLogger(__name__)
 

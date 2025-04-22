@@ -3,7 +3,7 @@
 		pre-commit update-pre-commit
 
 
-PROJECT_NAME := alsof
+PROJECT_NAME := lsoph
 
 
 all: dev coverage  ## builds everything
