@@ -6,6 +6,7 @@ import time
 from typing import Dict, Iterator, List, Optional, Set, Tuple
 
 from alsof.monitor import Monitor
+from alsof.util.pid import get_descendants
 
 # Setup logging - using the same pattern as other modules
 logging.basicConfig(
@@ -49,7 +50,11 @@ def _run_lsof(pids: Optional[List[int]] = None) -> Iterator[Dict]:
     log.info(f"Running lsof command: {' '.join(cmd)}")
 
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
+        # Redirect stderr to /dev/null to suppress tracefs warnings
+        with open(os.devnull, "w") as devnull:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=devnull, text=True
+            )
 
         current_record = {}
         for line in proc.stdout:
@@ -133,8 +138,104 @@ def _process_lsof_data(record: Dict, monitor: Monitor, timestamp: float) -> None
         monitor.write(pid, fd, path, True, timestamp)
 
 
+def _attach_with_descendants(pids: List[int], monitor: Monitor) -> None:
+    """
+    Attach to processes, their descendants, and monitor their open files using lsof.
+    This version tracks child processes by periodically checking for descendants.
+    """
+    log.info(f"Attaching to initial PIDs: {pids}")
+
+    # Keep track of all PIDs we're monitoring (including descendants)
+    all_pids = set(pids)
+
+    # Keep track of file descriptors we've seen for each PID
+    # to detect closures on subsequent runs
+    seen_fds: Dict[int, Set[Tuple[int, str]]] = {}
+
+    try:
+        poll_interval = 1.0  # seconds
+        child_check_interval = 5.0  # check for new children every 5 polls
+        poll_count = 0
+
+        log.info(f"Starting lsof polling with interval: {poll_interval} seconds")
+
+        while True:
+            timestamp = time.time()
+            poll_count += 1
+
+            # Check for descendants periodically
+            if poll_count % child_check_interval < 1:
+                log.debug(f"Checking for new child processes of {pids}")
+                new_pids = set()
+                for parent_pid in pids:
+                    try:
+                        descendants = get_descendants(parent_pid)
+                        for child_pid in descendants:
+                            if child_pid not in all_pids:
+                                log.info(f"Found new child process: {child_pid}")
+                                new_pids.add(child_pid)
+                    except Exception as e:
+                        log.debug(
+                            f"Error checking descendants for PID {parent_pid}: {e}"
+                        )
+
+                # Add any new PIDs to our tracking set
+                if new_pids:
+                    log.info(
+                        f"Adding {len(new_pids)} new child processes to monitoring"
+                    )
+                    all_pids.update(new_pids)
+
+            # Convert set back to list for lsof
+            current_pids = list(all_pids)
+            current_fds: Dict[int, Set[Tuple[int, str]]] = {}
+
+            record_count = 0
+            for record in _run_lsof(current_pids):
+                record_count += 1
+                pid = record.get("pid")
+                fd = record.get("fd")
+                path = record.get("path")
+
+                if pid and fd is not None and path:
+                    if pid not in current_fds:
+                        current_fds[pid] = set()
+                    current_fds[pid].add((fd, path))
+
+                _process_lsof_data(record, monitor, timestamp)
+
+            log.debug(f"Processed {record_count} lsof records")
+
+            # Detect closed files (present in seen_fds but not in current_fds)
+            close_count = 0
+            for pid, fd_paths in seen_fds.items():
+                current_pid_fds = current_fds.get(pid, set())
+                for fd, path in fd_paths:
+                    if (fd, path) not in current_pid_fds:
+                        log.debug(
+                            f"Detected closed file: PID {pid}, FD {fd}, path {path}"
+                        )
+                        monitor.close(pid, fd, True, timestamp)
+                        close_count += 1
+
+            if close_count > 0:
+                log.debug(f"Detected {close_count} closed files")
+
+            seen_fds = current_fds
+            log.debug(f"Sleeping for {poll_interval} seconds")
+            time.sleep(poll_interval)
+
+    except KeyboardInterrupt:
+        log.info("lsof monitoring interrupted by user")
+    except Exception as e:
+        log.exception(f"Unexpected error in lsof attach: {e}")
+
+
 def attach(pids: List[int], monitor: Monitor) -> None:
-    """Attach to processes and monitor their open files using lsof."""
+    """
+    Standard attach function which monitors the specified PIDs without tracking descendants.
+    For command execution with descendants tracking, use _attach_with_descendants.
+    """
     log.info(f"Attaching to PIDs: {pids}")
 
     # Keep track of file descriptors we've seen for each PID
@@ -163,7 +264,7 @@ def attach(pids: List[int], monitor: Monitor) -> None:
 
                 _process_lsof_data(record, monitor, timestamp)
 
-            log.info(f"Processed {record_count} lsof records")
+            log.debug(f"Processed {record_count} lsof records")
 
             # Detect closed files (present in seen_fds but not in current_fds)
             close_count = 0
@@ -178,7 +279,7 @@ def attach(pids: List[int], monitor: Monitor) -> None:
                         close_count += 1
 
             if close_count > 0:
-                log.info(f"Detected {close_count} closed files")
+                log.debug(f"Detected {close_count} closed files")
 
             seen_fds = current_fds
             log.debug(f"Sleeping for {poll_interval} seconds")
@@ -201,11 +302,10 @@ def run(command: List[str], monitor: Monitor) -> None:
         pid = proc.pid
         log.info(f"Command started with PID: {pid}")
 
-        # In a real implementation, we'd also track child processes
-        # by periodically checking for descendants
+        # Track the parent process and all its descendants
         pids = [pid]
-
-        attach(pids, monitor)
+        # Use a custom attach function to track descendants
+        _attach_with_descendants(pids, monitor)
 
     except subprocess.SubprocessError as e:
         log.error(f"Error launching command: {e}")
