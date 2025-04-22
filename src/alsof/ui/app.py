@@ -1,6 +1,6 @@
-# Filename: app.py
 """Main Textual application class for alsof."""
 
+import asyncio
 import logging
 from collections import deque
 from typing import Callable, List, Union
@@ -13,8 +13,7 @@ from textual.reactive import reactive
 from textual.widgets import DataTable, Footer, Static
 from textual.widgets.data_table import CellKey, RowKey
 
-# Local application imports
-from alsof.monitor import FileInfo, Monitor
+from alsof.monitor import Monitor, FileInfo
 from alsof.util.short_path import short_path
 
 from .detail_screen import DetailScreen
@@ -62,20 +61,47 @@ class FileApp(App[None]):
         backend_args: BackendArgsType,
         backend_worker_func: BackendWorkerFuncType,
     ):
-        """Initialize the FileApp."""
+        """Initialize the FileApp.
+
+        Args:
+            monitor (Monitor): The file monitor instance.
+            log_queue (deque): The queue for log messages.
+            backend_func (BackendFuncType): The backend function (attach/run) to execute.
+            backend_args (BackendArgsType): The arguments for the backend function (pids/command).
+            backend_worker_func (BackendWorkerFuncType): The actual function to run in the worker.
+        """
         super().__init__()
         self.monitor = monitor
         self.log_queue = log_queue
+        # Store backend info to start it later
         self._backend_func = backend_func
         self._backend_args = backend_args
         self._backend_worker_func = backend_worker_func
-        self._update_interval = 1.0  # in seconds
+        self._update_interval = 1.0
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the main application screen."""
         yield DataTable(id="file-table", cursor_type="row", zebra_stripes=True)
         yield Static("Status: Initializing...", id="status-bar")
         yield Footer()
+
+    async def _run_backend_in_thread(
+        self,
+        worker_func: BackendWorkerFuncType,
+        backend_func: BackendFuncType,
+        monitor: Monitor,
+        backend_args: BackendArgsType,
+    ) -> None:
+        """Runs the synchronous worker function in a thread using asyncio."""
+        log.debug(f"Async wrapper starting task for {worker_func.__name__}")
+        try:
+            # Use asyncio.to_thread to run the sync function in the event loop's thread pool
+            await asyncio.to_thread(worker_func, backend_func, monitor, backend_args)
+            log.debug(f"Async wrapper task for {worker_func.__name__} completed.")
+        except Exception:
+            log.exception(f"Exception in background worker {worker_func.__name__}")
+            # Optionally notify the user about the background error
+            # self.notify("Background task failed", severity="error", timeout=5)
 
     def on_mount(self) -> None:
         """Called when the app screen is mounted."""
@@ -88,13 +114,19 @@ class FileApp(App[None]):
         table.focus()
         log.debug("DataTable focused on mount.")
 
-        log.info("Starting backend worker via run_worker...")
+        # Start Backend Worker using the async wrapper
+        worker_name = f"backend_{self._backend_func.__module__}"
+        log.info(
+            f"Starting worker '{worker_name}' via run_worker with async wrapper..."
+        )
         self.run_worker(
-            self._backend_worker_func,
-            self._backend_func,
-            self.monitor,
-            self._backend_args,
-            name=f"backend_{self._backend_func.__module__}",
+            self._run_backend_in_thread(
+                self._backend_worker_func,
+                self._backend_func,
+                self.monitor,
+                self._backend_args,
+            ),
+            name=worker_name,
             group="backend_workers",
             exclusive=True,
         )
@@ -109,7 +141,7 @@ class FileApp(App[None]):
             status_bar = self.query_one("#status-bar", Static)
             status_bar.update(text)
         except Exception:
-            pass
+            pass  # Ignore errors if status bar not found
 
     def _get_emoji_for_file(self, info: FileInfo) -> str:
         """Determines the appropriate emoji based on file status and activity."""
@@ -149,8 +181,7 @@ class FileApp(App[None]):
             return
 
         log.info(
-            f"Monitor version changed ({self.last_monitor_version} -> "
-            f"{current_version}), updating table."
+            f"Monitor version changed ({self.last_monitor_version} -> {current_version}), updating table."
         )
         self.last_monitor_version = current_version
 
@@ -233,7 +264,7 @@ class FileApp(App[None]):
                 Text(path_display, style=style),
             )
             try:
-                # Use the actual path string as the key value
+                # Use the actual path string as the key value for the row
                 table.add_row(*row_data, key=row_key_value)
             except Exception as add_exc:
                 log.exception(f"Error adding row for key {row_key_value}: {add_exc}")
@@ -256,11 +287,10 @@ class FileApp(App[None]):
                 table.move_cursor(row=0, animate=False)
 
         status_bar.update(
-            f"Tracking {len(active_files)} files. "
-            f"Ignored: {len(self.monitor.ignored_paths)}. "
-            f"Monitor v{current_version}"
+            f"Tracking {len(active_files)} files. Ignored: {len(self.monitor.ignored_paths)}. Monitor v{current_version}"
         )
 
+    # --- Message Handler ---
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Called when the user presses Enter on a DataTable row."""
         log.debug(
@@ -280,6 +310,7 @@ class FileApp(App[None]):
             self.notify("Could not identify selected row key value.", severity="error")
             return
 
+        # Get the actual path string from the RowKey's value attribute
         path = str(row_key_obj.value)
         log.debug(f"Showing details for selected path: {path}")
         try:
@@ -300,6 +331,7 @@ class FileApp(App[None]):
             log.exception(f"Error pushing DetailScreen for path: {path}")
             self.notify(f"Error showing details: {e}", severity="error")
 
+    # --- Actions ---
     def action_quit(self) -> None:
         """Action to quit the application."""
         self.exit()
@@ -316,7 +348,8 @@ class FileApp(App[None]):
             row_key_obj = cell_key.row_key if cell_key else None
 
             if row_key_obj is not None and row_key_obj.value is not None:
-                path_to_ignore = str(row_key_obj.value)  # Use .value here too
+                # Use .value here too
+                path_to_ignore = str(row_key_obj.value)
                 log.info(f"Ignoring selected path: {path_to_ignore}")
                 self.monitor.ignore(path_to_ignore)
                 self.notify(f"Ignored: {short_path(path_to_ignore, 60)}", timeout=2)
@@ -369,5 +402,8 @@ class FileApp(App[None]):
             log.debug("--- End Monitor State Dump ---")
             self.notify("Monitor state dumped to log (debug level).")
         except Exception as e:
-            log.exception("Error during monitor state dump.", e)
-            self.notify(f"Error dumping monitor state. ({e})", severity="error")
+            log.exception("Error during monitor state dump.")
+            self.notify("Error dumping monitor state.", severity="error")
+
+
+# Removed the standalone main function
