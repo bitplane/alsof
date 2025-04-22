@@ -3,18 +3,15 @@
 # Filename: pid.py
 
 import argparse
-import logging
+import logging  # Keep logging import
 import os
 import sys
 
 import psutil
 
 # --- Setup Logging ---
-logging.basicConfig(
-    level=os.environ.get("LOGLEVEL", "WARNING").upper(),
-    format="%(levelname)s:%(name)s:%(message)s",
-)
-log = logging.getLogger(__name__)
+# REMOVED: logging.basicConfig(...)
+log = logging.getLogger(__name__)  # Get logger instance
 
 
 def get_descendants(parent_pid: int) -> list[int]:
@@ -90,6 +87,9 @@ def main(argv: list[str] | None = None) -> int:
     """
     Command-line entry point for testing pid functions.
     """
+    # --- Setup logging here ONLY for standalone script execution ---
+    # This allows running `python -m alsof.util.pid ...` with logging
+    # It won't interfere when imported as a module by cli.py
     parser = argparse.ArgumentParser(
         description="Test PID utilities: List descendants or get CWD.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -108,7 +108,12 @@ def main(argv: list[str] | None = None) -> int:
     mode_group.add_argument("--cwd", action="store_true", help="Get the process CWD.")
 
     args = parser.parse_args(argv)
-    logging.getLogger().setLevel(args.log.upper())
+
+    # Configure logging based on args ONLY if run as main
+    logging.basicConfig(
+        level=args.log.upper(), format="%(levelname)s:%(name)s:%(message)s"
+    )
+    # -----------------------------------------------------------------
 
     try:
         if args.cwd:

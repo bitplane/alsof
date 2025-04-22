@@ -3,6 +3,7 @@
 
 import logging
 from collections import deque
+from typing import Callable, List, Union
 
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -12,11 +13,17 @@ from textual.reactive import reactive
 from textual.widgets import DataTable, Footer, Static
 from textual.widgets.data_table import CellKey, RowKey
 
+# Local application imports
 from alsof.monitor import FileInfo, Monitor
 from alsof.util.short_path import short_path
 
 from .detail_screen import DetailScreen
 from .log_screen import LogScreen
+
+BackendFuncType = Callable[[Union[List[int], List[str]], Monitor], None]
+BackendArgsType = Union[List[int], List[str]]
+BackendWorkerFuncType = Callable[[BackendFuncType, Monitor, BackendArgsType], None]
+
 
 log = logging.getLogger("alsof.app")
 
@@ -30,7 +37,7 @@ class FileApp(App[None]):
         Binding("x", "ignore_all", "Ignore All", show=True),
         Binding("i,backspace,delete", "ignore_selected", "Ignore Selected", show=True),
         Binding("ctrl+l", "show_log", "Show Log / Close Log", show=True),
-        Binding("ctrl+d", "dump_monitor", "Dump Monitor", show=False),  # Debug binding
+        Binding("ctrl+d", "dump_monitor", "Dump Monitor", show=False),
     ]
     CSS = """
     Screen { border: none; }
@@ -47,12 +54,22 @@ class FileApp(App[None]):
 
     last_monitor_version = reactive(-1)
 
-    def __init__(self, monitor: Monitor, log_queue: deque):
+    def __init__(
+        self,
+        monitor: Monitor,
+        log_queue: deque,
+        backend_func: BackendFuncType,
+        backend_args: BackendArgsType,
+        backend_worker_func: BackendWorkerFuncType,
+    ):
         """Initialize the FileApp."""
         super().__init__()
         self.monitor = monitor
         self.log_queue = log_queue
-        self._update_interval = 1.0
+        self._backend_func = backend_func
+        self._backend_args = backend_args
+        self._backend_worker_func = backend_worker_func
+        self._update_interval = 1.0  # in seconds
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the main application screen."""
@@ -62,6 +79,7 @@ class FileApp(App[None]):
 
     def on_mount(self) -> None:
         """Called when the app screen is mounted."""
+        log.info("FileApp mounting...")
         table = self.query_one(DataTable)
         table.add_column("?", key="emoji", width=3)
         table.add_column("Activity", key="activity", width=10)
@@ -69,9 +87,21 @@ class FileApp(App[None]):
         self.update_table()
         table.focus()
         log.debug("DataTable focused on mount.")
+
+        log.info("Starting backend worker via run_worker...")
+        self.run_worker(
+            self._backend_worker_func,
+            self._backend_func,
+            self.monitor,
+            self._backend_args,
+            name=f"backend_{self._backend_func.__module__}",
+            group="backend_workers",
+            exclusive=True,
+        )
+
         self.set_interval(self._update_interval, self.update_table)
         self.update_status("Monitoring started...")
-        log.info("UI Mounted, starting update timer.")
+        log.info("UI Mounted, update timer started, backend worker started.")
 
     def update_status(self, text: str):
         """Helper to update the status bar widget safely."""
@@ -119,7 +149,8 @@ class FileApp(App[None]):
             return
 
         log.info(
-            f"Monitor version changed ({self.last_monitor_version} -> {current_version}), updating table."
+            f"Monitor version changed ({self.last_monitor_version} -> "
+            f"{current_version}), updating table."
         )
         self.last_monitor_version = current_version
 
@@ -226,17 +257,15 @@ class FileApp(App[None]):
 
         status_bar.update(
             f"Tracking {len(active_files)} files. "
-            f"Ignored: {len(self.monitor.ignored_paths)}. Monitor v{current_version}"
+            f"Ignored: {len(self.monitor.ignored_paths)}. "
+            f"Monitor v{current_version}"
         )
-
-    # --- Message Handler ---
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Called when the user presses Enter on a DataTable row."""
         log.debug(
             f"on_data_table_row_selected triggered. Event row_key obj: {event.row_key!r}"
         )
-
         if event.control.id != "file-table":
             log.debug(
                 f"Ignoring RowSelected event from control id '{event.control.id}'"
@@ -253,7 +282,6 @@ class FileApp(App[None]):
 
         path = str(row_key_obj.value)
         log.debug(f"Showing details for selected path: {path}")
-
         try:
             file_info = self.monitor.files.get(path)
             if file_info:
@@ -271,8 +299,6 @@ class FileApp(App[None]):
         except Exception as e:
             log.exception(f"Error pushing DetailScreen for path: {path}")
             self.notify(f"Error showing details: {e}", severity="error")
-
-    # --- Actions ---
 
     def action_quit(self) -> None:
         """Action to quit the application."""
@@ -315,8 +341,6 @@ class FileApp(App[None]):
             log.exception("Error ignoring all.")
             self.notify(f"Error ignoring all files: {e}", severity="error")
 
-    # Note: action_show_details is removed as its logic is now in on_data_table_row_selected
-
     def action_show_log(self) -> None:
         """Action to show or hide the log screen."""
         if isinstance(self.screen, LogScreen):
@@ -346,12 +370,4 @@ class FileApp(App[None]):
             self.notify("Monitor state dumped to log (debug level).")
         except Exception as e:
             log.exception("Error during monitor state dump.", e)
-            self.notify(f"Error dumping monitor state. {e}", severity="error")
-
-
-# This main function is usually called by cli.py, but can be useful for testing
-def main(monitor: Monitor, log_queue: deque):
-    """Runs the Textual application."""
-    log.info("Initializing Textual App...")
-    app = FileApp(monitor=monitor, log_queue=log_queue)
-    app.run()
+            self.notify(f"Error dumping monitor state. ({e})", severity="error")

@@ -4,12 +4,18 @@ import logging
 import os
 import shlex
 import sys
-import threading
 from collections import deque
+from typing import Callable, List, Union  # For type hinting
 
 from alsof.backend import lsof, strace
 from alsof.monitor import Monitor
-from alsof.ui import app
+
+# Import the app class itself
+from alsof.ui.app import FileApp  # Assuming app.py contains FileApp
+
+# Define the type for backend functions and arguments
+BackendFuncType = Callable[[Union[List[int], List[str]], Monitor], None]
+BackendArgsType = Union[List[int], List[str]]
 
 
 class TextualLogHandler(logging.Handler):
@@ -18,20 +24,17 @@ class TextualLogHandler(logging.Handler):
     def __init__(self, log_queue: deque):
         super().__init__()
         self.log_queue = log_queue
-        # Define a formatter that includes timestamp
         formatter = logging.Formatter(
-            "%(asctime)s %(name)s: %(message)s",
-            datefmt="%H:%M:%S",  # Example format: HH:MM:SS
+            "%(asctime)s %(name)s: %(message)s", datefmt="%H:%M:%S"
         )
         self.setFormatter(formatter)
 
     def emit(self, record: logging.LogRecord):
         """Emit a record, formatting it as a string with Rich markup."""
         try:
-            markup = ""
             plain_msg = f"{record.name}: {record.getMessage()}"
             timestamp = self.formatter.formatTime(record, self.formatter.datefmt)
-
+            markup = ""
             if record.levelno == logging.CRITICAL:
                 markup = f"{timestamp} [bold red]{plain_msg}[/bold red]"
             elif record.levelno == logging.ERROR:
@@ -39,47 +42,46 @@ class TextualLogHandler(logging.Handler):
             elif record.levelno == logging.WARNING:
                 markup = f"{timestamp} [yellow]{plain_msg}[/yellow]"
             elif record.levelno == logging.INFO:
-                markup = f"{timestamp} {plain_msg}"
+                markup = f"{timestamp} [green]{plain_msg}[/green]"
             elif record.levelno == logging.DEBUG:
                 markup = f"{timestamp} [dim]{plain_msg}[/dim]"
             else:
                 markup = f"{timestamp} {plain_msg}"
-
             self.log_queue.append(markup)
-
         except Exception:
             self.handleError(record)
 
 
-# Basic config will be overridden by setup later if log level arg is used
-# Set root logger level, but handler format controls output appearance
-logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO").upper())
+# Get root logger instance ONCE
 log = logging.getLogger("alsof.cli")
 
 BACKENDS = {"strace": (strace.attach, strace.run), "lsof": (lsof.attach, lsof.run)}
-
 DEFAULT_BACKEND = list(BACKENDS)[0]
 
 
-def _run_backend_thread(
-    backend_func: callable,  # Use lowercase callable
+# This function is now the target for the Textual worker
+def run_backend_worker(
+    backend_func: BackendFuncType,
     monitor_instance: Monitor,
-    target_args: list[str] | list[int],  # Use built-in list and |
+    target_args: BackendArgsType,
 ):
-    """Target function to run the selected backend in a thread."""
-    thread_log = logging.getLogger(f"alsof.backend.{backend_func.__name__}")
+    """Target function to run the selected backend in a background worker/thread."""
+    # Use a logger specific to the backend execution context
+    # Note: This logger will inherit handlers from the root logger configured in main()
+    worker_log = logging.getLogger(f"alsof.backend.{backend_func.__module__}")
     try:
-        thread_log.info("Starting backend function in background thread...")
+        worker_log.info("Starting backend function in background worker...")
         backend_func(target_args, monitor_instance)
-        thread_log.info("Backend function finished.")
+        worker_log.info("Backend function finished.")
     except Exception as e:
-        thread_log.exception(f"Unexpected error in backend thread: {e}")
+        # Log exceptions occurring within the backend function
+        worker_log.exception(f"Unexpected error in backend worker: {e}")
 
 
-def main(argv: list[str] | None = None) -> int:  # Use built-in list and |
+def main(argv: list[str] | None = None) -> int:
     """
-    Parses command line arguments, starts the selected backend in a thread,
-    and attempts to launch the UI.
+    Parses command line arguments, sets up logging and monitor,
+    and launches the UI, passing backend details for later execution.
     """
     parser = argparse.ArgumentParser(
         description="Monitors file access for a command or process.",
@@ -100,7 +102,6 @@ def main(argv: list[str] | None = None) -> int:  # Use built-in list and |
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Set the logging level (default: INFO)",
     )
-
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument(
         "-c",
@@ -119,32 +120,38 @@ def main(argv: list[str] | None = None) -> int:  # Use built-in list and |
 
     args = parser.parse_args(argv)
 
-    # --- Setup Logging Handler ---
+    # --- Centralized Logging Setup ---
     log_level = args.log.upper()
     log_queue = deque(maxlen=1000)  # Max 1000 lines in memory
 
-    # Configure root logger
-    root_logger = logging.getLogger()
+    # Configure root logger ONCE
+    root_logger = logging.getLogger()  # Get the root logger
     root_logger.setLevel(log_level)
 
-    # Remove existing handlers (like default StreamHandler) to avoid duplicate console output
+    # Remove any handlers potentially added by basicConfig in imported modules
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
 
-    # Add our custom handler
+    # Add our custom handler for the TUI
     textual_handler = TextualLogHandler(log_queue)
-    # The handler now defines its own format including timestamp
     root_logger.addHandler(textual_handler)
 
-    log.info(f"Log level set to {log_level}. Logging to Textual UI via queue.")
+    # Optionally, add a handler for critical errors to stderr just in case TUI fails
+    # stream_handler = logging.StreamHandler(sys.stderr)
+    # stream_handler.setLevel(logging.ERROR)
+    # stream_formatter = logging.Formatter("%(levelname)s:%(name)s:%(message)s")
+    # stream_handler.setFormatter(stream_formatter)
+    # root_logger.addHandler(stream_handler)
+
+    log.info(f"Log level set to {log_level}. Logging configured.")
+    # --- End Logging Setup ---
 
     # --- Setup Monitoring ---
     target_command: list[str] | None = None
     attach_ids: list[int] | None = None
     monitor_id = "monitor_session"
-    backend_attach_func: callable | None = None
-    backend_run_func: callable | None = None
-    backend_target_args: list[str] | list[int] | None = None
+    backend_func_to_run: BackendFuncType | None = None
+    backend_target_args: BackendArgsType | None = None
 
     selected_backend_funcs = BACKENDS.get(args.backend)
     if not selected_backend_funcs:
@@ -175,43 +182,32 @@ def main(argv: list[str] | None = None) -> int:  # Use built-in list and |
 
     monitor = Monitor(identifier=monitor_id)
 
-    # --- Start Backend Thread ---
+    # --- Prepare Backend Info for App ---
     if not backend_func_to_run or backend_target_args is None:
         log.critical("Could not determine backend function or arguments.")
-        return 1
-
-    backend_thread = threading.Thread(
-        target=_run_backend_thread,
-        args=(backend_func_to_run, monitor, backend_target_args),
-        name=f"{args.backend}_backend",
-        daemon=True,
-    )
-
-    try:
-        log.info(f"Starting backend thread: {backend_thread.name}")
-        backend_thread.start()
-    except Exception as e:
-        log.exception(f"Failed to start backend thread: {e}")
         return 1
 
     # --- Launch UI ---
     log.info("Attempting to launch UI...")
     exit_code = 0
     try:
-        log.info("Launching app.main()...")
-        app.main(monitor=monitor, log_queue=log_queue)
+        # Pass monitor, log_queue, AND backend details to the App
+        app_instance = FileApp(
+            monitor=monitor,
+            log_queue=log_queue,
+            backend_func=backend_func_to_run,
+            backend_args=backend_target_args,
+            backend_worker_func=run_backend_worker,  # Pass the actual worker function
+        )
+        app_instance.run()
         log.info("UI main function finished.")
 
     except Exception as e:
-        # Log critical UI errors to stderr since Textual might be down
-        print(f"FATAL UI ERROR: {e}", file=sys.stderr)
+        print(f"FATAL UI ERROR: {e}", file=sys.stderr)  # Print direct to stderr
         logging.exception(
             f"An unexpected error occurred launching or running the UI: {e}"
         )
         exit_code = 1
-    finally:
-        if backend_thread.is_alive():
-            log.info("Main thread exiting, backend daemon thread will terminate.")
 
     return exit_code
 

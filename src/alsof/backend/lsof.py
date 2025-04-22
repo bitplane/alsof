@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 import subprocess
 import time
@@ -6,8 +7,12 @@ from typing import Dict, Iterator, List, Optional, Set, Tuple
 
 from alsof.monitor import Monitor
 
-# Use package-aware logger name to match existing code style
-log = logging.getLogger("alsof.lsof")
+# Setup logging - using the same pattern as other modules
+logging.basicConfig(
+    level=os.environ.get("LOGLEVEL", "WARNING").upper(),
+    format="%(levelname)s:%(name)s:%(message)s",
+)
+log = logging.getLogger("alsof.backend.lsof")  # Use package-aware logger name
 
 # Regular expressions for parsing lsof output
 # Format: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
@@ -104,7 +109,7 @@ def _process_lsof_data(record: Dict, monitor: Monitor, timestamp: float) -> None
     fd = record.get("fd")
 
     if not (pid and path):
-        log.warning(f"Incomplete record missing pid or path: {record}")
+        log.debug(f"Incomplete record missing pid or path: {record}")
         return
 
     # If fd is None, this is a special file like cwd, not an open fd
@@ -216,7 +221,7 @@ def run(command: List[str], monitor: Monitor) -> None:
                     f"Process terminated gracefully with exit code: {proc.returncode}"
                 )
             except subprocess.TimeoutExpired:
-                log.warning(
+                log.debug(
                     f"Process did not terminate gracefully, killing PID {proc.pid}"
                 )
                 proc.kill()
