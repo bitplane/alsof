@@ -420,7 +420,7 @@ class FileApp(App[None]):
             )
             self.monitor.ignore_all()
             # Trigger immediate table update after ignoring all
-            self.monitor.update()
+            self.monitor.change()
             self.update_table()
             # Move cursor to top after clearing all
             table = self.query_one(DataTable)
