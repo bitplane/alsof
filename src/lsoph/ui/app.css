@@ -1,0 +1,70 @@
+/* Filename: src/lsoph/ui/app.css */
+
+/* Basic screen styling */
+Screen {
+    /* Allow footer and status bar to dock */
+    /* layout: vertical; */ /* Default layout */
+}
+
+/* DataTable styling */
+DataTable {
+    /* Take up available vertical space */
+    height: 1fr;
+    /* Ensure table tries to fill width */
+    width: 100%;
+    /* Add a subtle border */
+    border: thick $accent-darken-2;
+    /* Heavy border for focused state */
+    border-focus: heavy $accent;
+}
+
+/* Status bar styling */
+#status-bar {
+    /* Dock at the bottom, above the footer */
+    dock: bottom;
+    /* Auto height based on content */
+    height: auto;
+    /* Muted text color */
+    color: $text-muted;
+    /* Padding */
+    padding: 0 1;
+    /* Optional: background color */
+    /* background: $surface-darken-1; */
+}
+
+/* Footer styling (default Textual footer) */
+Footer {
+    /* Dock at the very bottom */
+    dock: bottom;
+    height: auto;
+}
+
+/* Styling for modal screens (applied via DEFAULT_CSS in Python for now) */
+/* These could be moved here if preferred */
+/*
+LogScreen > Container {
+    border: thick $accent; padding: 1 2; width: 80%; height: 80%; background: $surface;
+    grid-size: 1; grid-rows: auto 1fr; grid-gutter: 1;
+}
+DetailScreen > Container {
+    border: thick $accent; padding: 1 2; width: 90%; height: 80%; background: $surface;
+    grid-size: 2; grid-gutter: 1 2; grid-rows: auto 1fr;
+}
+*/
+
+/* Specific widget styling within modals */
+/*
+#log-header, #detail-header {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#log-scroll-container, #event-log-container {
+    border: round $panel;
+}
+
+#app-log, #event-log {
+    width: 100%;
+    height: 100%;
+}
+*/
