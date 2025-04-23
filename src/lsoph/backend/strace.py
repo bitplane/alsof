@@ -1,41 +1,45 @@
 # Filename: src/lsoph/backend/strace.py
 
 import argparse
+import asyncio  # Ensure asyncio is imported
 import logging
 import os
 import shlex
 import sys
-from collections.abc import Callable, Iterator
-from typing import Any, Dict, List, Optional, Tuple  # Added Optional, Tuple, Dict, Any
+
+# Use Python 3.10+ style hints
+from collections.abc import AsyncIterator, Callable
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import psutil
 
-# Import necessary components from strace_cmd and monitor
+# Import async components from strace_cmd
+from lsoph.backend.strace_cmd import parse_strace_stream  # Now an async generator
 from lsoph.backend.strace_cmd import (
     DEFAULT_SYSCALLS,
     EXIT_SYSCALLS,
     PROCESS_SYSCALLS,
     Syscall,
-    parse_strace_stream,
 )
 from lsoph.monitor import Monitor
 from lsoph.util.pid import get_cwd as pid_get_cwd
 
+# Import base class
+from .base import Backend
+
 log = logging.getLogger("lsoph.backend.strace")
 
-# Type alias for handler functions
+# Type alias for handler functions (remains sync)
 SyscallHandler = Callable[[Syscall, Monitor, Dict[int, str]], None]
 
 
-# --- Helper Functions ---
-
-
+# --- Helper Functions (remain synchronous) ---
+# _parse_result_int, _clean_path_arg, _parse_dirfd, _resolve_path
+# remain the same.
 def _parse_result_int(result_str: str) -> Optional[int]:
-    """Parses strace result string (dec/hex/?), returns integer or None."""
     if not result_str or result_str == "?":
         return None
     try:
-        # Attempt to parse as integer, automatically handling hex (0x...) / octal (0...)
         return int(result_str, 0)
     except ValueError:
         log.warning(f"Could not parse result string as integer: '{result_str}'")
@@ -43,65 +47,41 @@ def _parse_result_int(result_str: str) -> Optional[int]:
 
 
 def _clean_path_arg(path_arg: Any) -> Optional[str]:
-    """
-    Cleans a potential path argument from strace output.
-    Removes surrounding quotes and attempts basic escape sequence decoding.
-    Handles hex-encoded strings from strace's -xx option.
-    """
     if not isinstance(path_arg, str) or not path_arg:
         return None
-
     path = path_arg
-
-    # 1. Handle hex-encoded strings (from -xx) like "\x41\x42..."
     if path.startswith('"') and path.endswith('"') and "\\x" in path:
-        path = path[1:-1]  # Remove quotes
+        path = path[1:-1]
         try:
-            # Decode using raw_unicode_escape which handles \xNN
             decoded_bytes = (
                 path.encode("latin-1", "backslashreplace")
                 .decode("unicode_escape")
                 .encode("latin-1", "surrogateescape")
             )
-            # Attempt to decode as UTF-8, falling back to latin-1 if needed
             try:
                 path = decoded_bytes.decode("utf-8")
             except UnicodeDecodeError:
                 path = decoded_bytes.decode("latin-1")
-            log.debug(f"Decoded hex path '{path_arg}' to '{path}'")
         except Exception as e:
             log.warning(
                 f"Failed to decode hex path '{path_arg}': {e}. Using raw value after quote removal."
             )
-            # Keep path as the quote-removed string
-
-    # 2. Handle regular quoted strings (if not hex-decoded)
     elif path.startswith('"') and path.endswith('"'):
         path = path[1:-1]
-        # Attempt standard escape sequence decoding (e.g., \n, \t)
         try:
-            # Use string escape for standard sequences
             path = path.encode("latin-1", "backslashreplace").decode("unicode_escape")
         except Exception as e:
             log.warning(
                 f"Error decoding standard escapes in path '{path_arg}': {e}. Using raw value after quote removal."
             )
-            # Keep path as the quote-removed string
-
-    # 3. Handle non-quoted strings (or strings after quote removal)
-    # No further processing needed unless specific escapes need handling here.
-
     return path
 
 
 def _parse_dirfd(dirfd_arg: Optional[str]) -> Optional[Union[int, str]]:
-    """Parses the dirfd argument string (e.g., "AT_FDCWD", "3") from strace output."""
     if dirfd_arg is None:
         return None
-    # Check for the special AT_FDCWD constant
     if isinstance(dirfd_arg, str) and dirfd_arg.strip().upper() == "AT_FDCWD":
         return "AT_FDCWD"
-    # Try parsing as an integer (handles dec/hex/octal)
     try:
         return int(str(dirfd_arg), 0)
     except (ValueError, TypeError):
@@ -113,180 +93,96 @@ def _resolve_path(
     pid: int,
     path: Optional[str],
     cwd_map: Dict[int, str],
-    monitor: Monitor,  # Pass monitor to look up paths for numeric dirfds
+    monitor: Monitor,
     dirfd: Optional[Union[int, str]] = None,
 ) -> Optional[str]:
-    """
-    Converts a potentially relative path from strace to an absolute path.
-    Uses the process's tracked CWD, dirfd argument, and monitor state.
-
-    Args:
-        pid: The process ID performing the syscall.
-        path: The path string from the syscall arguments.
-        cwd_map: Dictionary mapping PIDs to their known CWDs.
-        monitor: The Monitor instance to look up paths for numeric dirfds.
-        dirfd: The parsed dirfd argument (AT_FDCWD, an integer FD, or None).
-
-    Returns:
-        The resolved absolute path string, the original path if resolution fails,
-        or None if the input path was None.
-    """
-    log.debug(
-        f"_resolve_path called: pid={pid}, path='{path}', cwd_map has pid={pid in cwd_map}, dirfd='{dirfd}'"
-    )
-
     if path is None:
         return None
-
-    # Handle special paths like "<socket:[...]>", "<pipe:[...]>", "@..."
     if (path.startswith("<") and path.endswith(">")) or path.startswith("@"):
-        log.debug(f"Path '{path}' is special, returning as is.")
         return path
-
     base_dir: Optional[str] = None
-
-    # --- Determine Base Directory based on dirfd ---
     if dirfd is not None:
         if dirfd == "AT_FDCWD":
-            # Use the process's current working directory
             base_dir = cwd_map.get(pid)
-            log.debug(f"dirfd is AT_FDCWD, using base_dir from cwd_map: '{base_dir}'")
         elif isinstance(dirfd, int) and dirfd >= 0:
-            # Look up the path associated with the numeric file descriptor
             base_dir = monitor.get_path(pid, dirfd)
-            if base_dir:
-                # Ensure the base path is actually a directory
-                # This requires an OS check, which might be slow or have permission issues.
-                # For now, we'll trust the syscall implies it's a directory context.
-                # Consider adding os.path.isdir check if strictness is needed.
-                log.debug(
-                    f"dirfd is {dirfd}, resolved base_dir from monitor: '{base_dir}'"
-                )
-            else:
+            if not base_dir:
                 log.warning(
-                    f"Numeric dirfd={dirfd} for PID {pid} not found in monitor state. Cannot resolve relative path."
+                    f"Numeric dirfd={dirfd} for PID {pid} not found in monitor state."
                 )
-                # Cannot resolve reliably, return original path
                 return path
         else:
-            log.warning(
-                f"Unhandled or invalid dirfd type/value: {dirfd!r}. Cannot resolve relative path."
-            )
-            return path  # Cannot resolve reliably
-
-    # --- Resolve the Path ---
-    # If the path is already absolute, return it directly.
-    # Note: os.path.isabs might behave differently on different OSes, but handles basic cases.
+            log.warning(f"Unhandled dirfd type/value: {dirfd!r}.")
+            return path
     if os.path.isabs(path):
-        if dirfd is not None:
-            # An absolute path with dirfd usually means dirfd is ignored by the kernel.
-            log.debug(
-                f"Path '{path}' is absolute, ignoring dirfd='{dirfd}'. Returning absolute path."
-            )
-        else:
-            log.debug(f"Path '{path}' is absolute, returning directly.")
         return path
     else:
-        # Path is relative. Resolve it against the determined base directory.
         if base_dir is None:
-            # If dirfd wasn't specified, use the process's CWD as the base.
             base_dir = cwd_map.get(pid)
-            log.debug(f"No dirfd specified, using base_dir from cwd_map: '{base_dir}'")
-
         if base_dir:
             try:
-                # Join the base directory and the relative path
-                abs_path = os.path.normpath(os.path.join(base_dir, path))
-                log.debug(
-                    f"Resolved relative path '{path}' using base '{base_dir}' -> '{abs_path}'"
-                )
-                return abs_path
+                return os.path.normpath(os.path.join(base_dir, path))
             except Exception as e:
-                # Log if joining fails (e.g., invalid characters)
                 log.warning(
                     f"Error joining path '{path}' with base_dir '{base_dir}': {e}"
                 )
-                # Fall through to returning original path
         else:
-            # Could not determine base directory (e.g., CWD unknown and no valid dirfd)
             log.warning(
-                f"Could not determine base directory for PID {pid} to resolve relative path '{path}'. Returning original."
+                f"Could not determine base directory for PID {pid} to resolve relative path '{path}'."
             )
-            return path
+    return path
 
 
-# --- Syscall Handlers ---
-# These functions take the parsed Syscall, the Monitor, and the current CWD map.
-
-
+# --- Syscall Handlers (remain synchronous) ---
+# _handle_open_creat, _handle_close, _handle_read_write, _handle_stat, _handle_delete, _handle_rename
+# remain the same internally.
 def _handle_open_creat(event: Syscall, monitor: Monitor, cwd_map: Dict[int, str]):
-    """Handles open, openat, creat syscalls."""
     pid = event.pid
     success = event.error_name is None
     timestamp = event.timestamp
     details: Dict[str, Any] = {"syscall": event.syscall}
     path: Optional[str] = None
     dirfd: Optional[Union[int, str]] = None
-
     if event.syscall in ["open", "creat"]:
         path_arg = _clean_path_arg(event.args[0] if event.args else None)
-        path = _resolve_path(pid, path_arg, cwd_map, monitor)  # dirfd is implicitly CWD
+        path = _resolve_path(pid, path_arg, cwd_map, monitor)
     elif event.syscall == "openat":
         dirfd_arg = event.args[0] if event.args else None
         path_arg = _clean_path_arg(event.args[1] if len(event.args) > 1 else None)
         dirfd = _parse_dirfd(dirfd_arg)
         path = _resolve_path(pid, path_arg, cwd_map, monitor, dirfd=dirfd)
-        details["dirfd"] = dirfd_arg  # Store original dirfd string for info
-
+        details["dirfd"] = dirfd_arg
     if path is not None:
         fd = _parse_result_int(event.result_str) if success else -1
-        if fd is None:
-            fd = -1  # Treat parse failure as invalid fd
+        fd = fd if fd is not None else -1
         details["fd"] = fd
         monitor.open(pid, path, fd, success, timestamp, **details)
-    else:
-        log.warning(
-            f"Skipping {event.syscall}, could not resolve path from args: {event.args}"
-        )
 
 
 def _handle_close(event: Syscall, monitor: Monitor, cwd_map: Dict[int, str]):
-    """Handles close syscall."""
     pid = event.pid
     success = event.error_name is None
     timestamp = event.timestamp
     details: Dict[str, Any] = {"syscall": event.syscall}
-
     fd_arg = _parse_result_int(str(event.args[0])) if event.args else None
     if fd_arg is not None:
         details["fd"] = fd_arg
         monitor.close(pid, fd_arg, success, timestamp, **details)
-    else:
-        log.warning(f"Skipping close, invalid/missing fd argument: {event.args}")
 
 
 def _handle_read_write(event: Syscall, monitor: Monitor, cwd_map: Dict[int, str]):
-    """Handles read, pread64, readv, write, pwrite64, writev syscalls."""
     pid = event.pid
     success = event.error_name is None
     timestamp = event.timestamp
     details: Dict[str, Any] = {"syscall": event.syscall}
-
     fd_arg = _parse_result_int(str(event.args[0])) if event.args else None
     if fd_arg is None:
-        log.warning(
-            f"Skipping {event.syscall}, invalid/missing fd argument: {event.args}"
-        )
         return
-
     details["fd"] = fd_arg
-    path = monitor.get_path(pid, fd_arg)  # Get path from monitor state
-
+    path = monitor.get_path(pid, fd_arg)
     byte_count = _parse_result_int(event.result_str) if success else 0
-    if byte_count is None:
-        byte_count = 0  # Treat parse failure as 0 bytes
+    byte_count = byte_count if byte_count is not None else 0
     details["bytes"] = byte_count
-
     if event.syscall.startswith("read"):
         monitor.read(pid, fd_arg, path, success, timestamp, **details)
     elif event.syscall.startswith("write"):
@@ -294,42 +190,32 @@ def _handle_read_write(event: Syscall, monitor: Monitor, cwd_map: Dict[int, str]
 
 
 def _handle_stat(event: Syscall, monitor: Monitor, cwd_map: Dict[int, str]):
-    """Handles access, stat, lstat, newfstatat syscalls."""
     pid = event.pid
     success = event.error_name is None
     timestamp = event.timestamp
     details: Dict[str, Any] = {"syscall": event.syscall}
     path: Optional[str] = None
     dirfd: Optional[Union[int, str]] = None
-
     if event.syscall in ["access", "stat", "lstat"]:
         path_arg = _clean_path_arg(event.args[0] if event.args else None)
         path = _resolve_path(pid, path_arg, cwd_map, monitor)
     elif event.syscall == "newfstatat":
         dirfd_arg = event.args[0] if event.args else None
         path_arg = _clean_path_arg(event.args[1] if len(event.args) > 1 else None)
-        # Note: path can be empty string for newfstatat to stat the dirfd itself
         dirfd = _parse_dirfd(dirfd_arg)
         path = _resolve_path(pid, path_arg, cwd_map, monitor, dirfd=dirfd)
         details["dirfd"] = dirfd_arg
-
     if path is not None:
         monitor.stat(pid, path, success, timestamp, **details)
-    else:
-        log.warning(
-            f"Skipping {event.syscall}, could not resolve path from args: {event.args}"
-        )
 
 
 def _handle_delete(event: Syscall, monitor: Monitor, cwd_map: Dict[int, str]):
-    """Handles unlink, unlinkat, rmdir syscalls."""
     pid = event.pid
     success = event.error_name is None
     timestamp = event.timestamp
     details: Dict[str, Any] = {"syscall": event.syscall}
     path: Optional[str] = None
     dirfd: Optional[Union[int, str]] = None
-
     if event.syscall in ["unlink", "rmdir"]:
         path_arg = _clean_path_arg(event.args[0] if event.args else None)
         path = _resolve_path(pid, path_arg, cwd_map, monitor)
@@ -339,17 +225,11 @@ def _handle_delete(event: Syscall, monitor: Monitor, cwd_map: Dict[int, str]):
         dirfd = _parse_dirfd(dirfd_arg)
         path = _resolve_path(pid, path_arg, cwd_map, monitor, dirfd=dirfd)
         details["dirfd"] = dirfd_arg
-
     if path is not None:
         monitor.delete(pid, path, success, timestamp, **details)
-    else:
-        log.warning(
-            f"Skipping {event.syscall}, could not resolve path from args: {event.args}"
-        )
 
 
 def _handle_rename(event: Syscall, monitor: Monitor, cwd_map: Dict[int, str]):
-    """Handles rename, renameat, renameat2 syscalls."""
     pid = event.pid
     success = event.error_name is None
     timestamp = event.timestamp
@@ -358,7 +238,6 @@ def _handle_rename(event: Syscall, monitor: Monitor, cwd_map: Dict[int, str]):
     new_path: Optional[str] = None
     old_dirfd: Optional[Union[int, str]] = None
     new_dirfd: Optional[Union[int, str]] = None
-
     if event.syscall == "rename":
         old_path_arg = _clean_path_arg(event.args[0] if event.args else None)
         new_path_arg = _clean_path_arg(event.args[1] if len(event.args) > 1 else None)
@@ -375,18 +254,11 @@ def _handle_rename(event: Syscall, monitor: Monitor, cwd_map: Dict[int, str]):
         new_path = _resolve_path(pid, new_path_arg, cwd_map, monitor, dirfd=new_dirfd)
         details["old_dirfd"] = old_dirfd_arg
         details["new_dirfd"] = new_dirfd_arg
-
     if old_path and new_path:
         monitor.rename(pid, old_path, new_path, success, timestamp, **details)
-    else:
-        log.warning(
-            f"Skipping {event.syscall}, could not resolve paths from args: {event.args}"
-        )
 
 
-# --- Syscall Dispatcher ---
-
-# Dictionary mapping syscall names to their handler functions
+# --- Syscall Dispatcher (synchronous) ---
 SYSCALL_HANDLERS: Dict[str, SyscallHandler] = {
     "open": _handle_open_creat,
     "openat": _handle_open_creat,
@@ -408,25 +280,18 @@ SYSCALL_HANDLERS: Dict[str, SyscallHandler] = {
     "rename": _handle_rename,
     "renameat": _handle_rename,
     "renameat2": _handle_rename,
-    # chdir/fchdir are handled separately for CWD tracking
-    # process/exit syscalls are handled separately
 }
 
 
 # --- Core Event Processing Logic ---
-
-
 def _update_cwd(pid: int, cwd_map: Dict[int, str], monitor: Monitor, event: Syscall):
     """Updates the CWD map based on chdir or fchdir syscalls."""
     success = event.error_name is None
     timestamp = event.timestamp
     details: Dict[str, Any] = {"syscall": event.syscall}
-
     if not success:
-        # Failed CWD changes don't update the map, but record the attempt
         if event.syscall == "chdir":
             path_arg = _clean_path_arg(event.args[0] if event.args else None)
-            # Try resolving path even on failure for logging/history
             path = _resolve_path(pid, path_arg, cwd_map, monitor)
             if path:
                 monitor.stat(pid, path, success, timestamp, **details)
@@ -436,9 +301,7 @@ def _update_cwd(pid: int, cwd_map: Dict[int, str], monitor: Monitor, event: Sysc
                 path = monitor.get_path(pid, fd_arg)
                 if path:
                     monitor.stat(pid, path, success, timestamp, fd=fd_arg, **details)
-        return  # Don't update cwd_map on failure
-
-    # Handle successful CWD changes
+        return
     new_cwd: Optional[str] = None
     if event.syscall == "chdir":
         path_arg = _clean_path_arg(event.args[0] if event.args else None)
@@ -446,7 +309,7 @@ def _update_cwd(pid: int, cwd_map: Dict[int, str], monitor: Monitor, event: Sysc
         if resolved_path:
             new_cwd = resolved_path
             details["path"] = resolved_path
-            monitor.stat(pid, new_cwd, success, timestamp, **details)  # Record access
+            monitor.stat(pid, new_cwd, success, timestamp, **details)
         else:
             log.warning(
                 f"Could not resolve successful chdir path '{path_arg}' for PID {pid}"
@@ -456,12 +319,9 @@ def _update_cwd(pid: int, cwd_map: Dict[int, str], monitor: Monitor, event: Sysc
         if fd_arg is not None:
             target_path = monitor.get_path(pid, fd_arg)
             if target_path:
-                # Assume the target of a successful fchdir is a directory
                 new_cwd = target_path
                 details["fd"] = fd_arg
-                monitor.stat(
-                    pid, new_cwd, success, timestamp, **details
-                )  # Record access
+                monitor.stat(pid, new_cwd, success, timestamp, **details)
             else:
                 log.warning(
                     f"Successful fchdir(fd={fd_arg}) target path unknown for PID {pid}."
@@ -470,25 +330,21 @@ def _update_cwd(pid: int, cwd_map: Dict[int, str], monitor: Monitor, event: Sysc
             log.warning(
                 f"Successful fchdir for PID {pid} had invalid fd argument: {event.args}"
             )
-
-    # Update the map if a new CWD was determined
     if new_cwd:
         cwd_map[pid] = new_cwd
         log.info(f"PID {pid} changed CWD via {event.syscall} to: {new_cwd}")
 
 
-def _process_event_stream(
-    event_stream: Iterator[Syscall],
+async def _process_event_stream(
+    event_stream: AsyncIterator[Syscall],
     monitor: Monitor,
+    should_stop: asyncio.Event,
     initial_pids: Optional[List[int]] = None,
 ):
     """
-    Processes the stream of Syscall events, updates monitor state and CWD map.
+    Asynchronously processes the stream of Syscall events using timeout-based yielding.
     """
-    # CWD map: pid -> path string
     pid_cwd_map: Dict[int, str] = {}
-
-    # Initialize CWD for initially attached PIDs
     if initial_pids:
         for pid in initial_pids:
             cwd = pid_get_cwd(pid)
@@ -498,218 +354,158 @@ def _process_event_stream(
             else:
                 log.warning(f"Could not fetch initial CWD for PID {pid}")
 
-    log.info("Starting strace event processing loop...")
-    for event in event_stream:
-        pid = event.pid  # PID should be resolved by parse_strace_stream
-        syscall_name = event.syscall
-        success = event.error_name is None
-        timestamp = event.timestamp
+    log.info("Starting async strace event processing loop (v3 - timeout)...")
+    processed_count_total = 0
+    GET_NEXT_TIMEOUT = 0.05  # Timeout (seconds) for getting the next event
 
-        # Ensure CWD is known for the process if possible
-        if pid not in pid_cwd_map:
-            cwd = pid_get_cwd(pid)
-            if cwd:
-                pid_cwd_map[pid] = cwd
-                log.info(f"Fetched CWD for newly seen PID {pid}: {cwd}")
-            else:
-                # Log warning but continue; path resolution might use fallbacks
-                log.warning(
-                    f"Could not determine CWD for PID {pid}. Relative path resolution may be affected."
-                )
-
-        # Handle CWD changes first
-        if syscall_name in ["chdir", "fchdir"]:
-            _update_cwd(pid, pid_cwd_map, monitor, event)
-            continue  # CWD update handled, move to next event
-
-        # Handle process exit
-        if syscall_name in EXIT_SYSCALLS:
-            monitor.process_exit(pid, timestamp)
-            # Clean up CWD map for the exiting process
-            if pid in pid_cwd_map:
-                del pid_cwd_map[pid]
-                log.debug(f"Removed PID {pid} from CWD map on exit.")
-            continue  # Exit handled, move to next event
-
-        # Handle other file-related syscalls using the dispatcher
-        handler = SYSCALL_HANDLERS.get(syscall_name)
-        if handler:
+    try:
+        while not should_stop.is_set():
+            event: Optional[Syscall] = None
             try:
-                # Add common details before calling handler
-                details = {"syscall": syscall_name}
-                if not success and event.error_name:
-                    details["error_name"] = event.error_name
-                    details["error_msg"] = event.error_msg
-                # Note: Handlers might add more details like 'bytes', 'fd' etc.
-
-                # Call the specific handler
-                handler(event, monitor, pid_cwd_map)
-
-            except Exception as e:
-                log.exception(
-                    f"Error in handler for syscall {syscall_name} (event: {event!r}): {e}"
+                # Try to get the next event with a timeout
+                # Note: anext() is built-in in Python 3.10+
+                event = await asyncio.wait_for(
+                    anext(event_stream), timeout=GET_NEXT_TIMEOUT
                 )
-        else:
-            # Log unhandled (but traced) syscalls for debugging if needed
-            if (
-                syscall_name not in PROCESS_SYSCALLS
-            ):  # Already handled internally by parser
-                log.debug(f"No specific handler for syscall: {syscall_name}")
+            except StopAsyncIteration:
+                log.info("Event stream ended.")
+                break  # Exit the main loop
+            except asyncio.TimeoutError:
+                # No event received within timeout.
+                # This is expected during idle periods. We don't need to log it.
+                # We must explicitly yield control here.
+                await asyncio.sleep(0.01)  # Yield control briefly
+                continue  # Go back to check should_stop and wait for next event
+            except asyncio.CancelledError:
+                log.info("Event stream get cancelled.")
+                break
+            except Exception as e:
+                log.exception(f"Error getting next event from stream: {e}")
+                break  # Stop processing on unexpected error fetching events
 
-    log.info("Finished processing strace event stream.")
+            # --- Process the received event (if any) ---
+            if event:
+                processed_count_total += 1
+                pid = event.pid
+                syscall_name = event.syscall
+                success = event.error_name is None
+                timestamp = event.timestamp
 
+                # Ensure CWD is known (sync ok)
+                if pid not in pid_cwd_map:
+                    cwd = pid_get_cwd(pid)
+                    if cwd:
+                        pid_cwd_map[pid] = cwd
+                        log.info(f"Fetched CWD for newly seen PID {pid}: {cwd}")
+                    else:
+                        log.warning(f"Could not determine CWD for PID {pid}.")
 
-# --- Public Interface Functions ---
+                # Handle specific syscalls
+                if syscall_name in ["chdir", "fchdir"]:
+                    _update_cwd(pid, pid_cwd_map, monitor, event)
+                    continue
+                if syscall_name in EXIT_SYSCALLS:
+                    monitor.process_exit(pid, timestamp)
+                    if pid in pid_cwd_map:
+                        del pid_cwd_map[pid]
+                        log.debug(f"Removed PID {pid} from CWD map on exit.")
+                    continue
 
+                # Handle dispatched syscalls
+                handler = SYSCALL_HANDLERS.get(syscall_name)
+                if handler:
+                    try:
+                        details = {"syscall": syscall_name}
+                        if not success and event.error_name:
+                            details["error_name"] = event.error_name
+                            details["error_msg"] = event.error_msg
+                        handler(event, monitor, pid_cwd_map)
+                    except Exception as e:
+                        log.exception(
+                            f"Error in handler for syscall {syscall_name} (event: {event!r}): {e}"
+                        )
 
-def attach(pids: List[int], monitor: Monitor, syscalls: List[str] = DEFAULT_SYSCALLS):
-    """Attaches strace to existing PIDs/TIDs and processes events."""
-    if not pids:
-        log.warning("strace.attach called with no PIDs.")
-        return
-    log.info(f"Attaching strace to PIDs/TIDs: {pids}")
+                # Optional: Yield control explicitly after processing *each* event if still unresponsive
+                # This might be needed if handlers become complex or monitor updates are slow.
+                # await asyncio.sleep(0)
 
-    try:
-        # Get the stream of parsed Syscall events
-        event_stream = parse_strace_stream(
-            monitor=monitor, attach_ids=pids, syscalls=syscalls
-        )
-        # Process the stream
-        _process_event_stream(event_stream, monitor, initial_pids=pids)
-    except KeyboardInterrupt:
-        log.info("Strace attach interrupted by user.")
-    except (ValueError, FileNotFoundError, RuntimeError) as e:
-        # Errors during strace startup or FIFO handling
-        log.error(f"Failed to start or run strace for attach: {e}")
-    except Exception as e:
-        log.exception(f"Unexpected error during strace attach processing: {e}")
+            # Check stop event again after processing (or timeout)
+            if should_stop.is_set():
+                log.info("Stop event set after processing/timeout, breaking loop.")
+                break
+
+    except asyncio.CancelledError:
+        log.info("Strace event processing task cancelled.")
     finally:
-        log.info("Strace attach finished.")
-
-
-def run(command: List[str], monitor: Monitor, syscalls: List[str] = DEFAULT_SYSCALLS):
-    """Launches a command via strace and processes events."""
-    if not command:
-        log.error("strace.run called with empty command.")
-        return
-    log.info(f"Running command via strace: {' '.join(shlex.quote(c) for c in command)}")
-
-    try:
-        # Get the stream of parsed Syscall events
-        event_stream = parse_strace_stream(
-            monitor=monitor, target_command=command, syscalls=syscalls
+        log.info(
+            f"Finished processing strace event stream. Total events: {processed_count_total}"
         )
-        # Process the stream
-        _process_event_stream(
-            event_stream, monitor
-        )  # Initial PIDs determined by parser
-    except KeyboardInterrupt:
-        log.info("Strace run interrupted by user.")
-    except (ValueError, FileNotFoundError, RuntimeError) as e:
-        # Errors during strace startup or FIFO handling
-        log.error(f"Failed to start or run strace for run: {e}")
-    except Exception as e:
-        log.exception(f"Unexpected error during strace run processing: {e}")
-    finally:
-        log.info("Strace run finished.")
 
 
-# --- Main Execution Function (for testing) ---
-# (Keep the original main for standalone testing if desired, ensuring it uses the new structure)
-def main(argv: list[str] | None = None) -> int:
-    """Command-line entry point for testing strace adapter."""
-    parser = argparse.ArgumentParser(
-        description="Strace adapter (Test): runs/attaches strace and updates Monitor state.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Examples:\n  sudo python3 -m lsoph.backend.strace -c find . -maxdepth 1\n  sudo python3 -m lsoph.backend.strace -p 1234",
-    )
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument(
-        "-c",
-        "--command",
-        nargs=argparse.REMAINDER,
-        help="The target command and its arguments to launch and trace.",
-    )
-    group.add_argument(
-        "-p",
-        "--pids",
-        nargs="+",
-        type=int,
-        metavar="PID",
-        help="One or more existing process IDs (PIDs) to attach to.",
-    )
-    parser.add_argument(
-        "--log",
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Set the logging level (default: INFO)",
-    )
-    args = parser.parse_args(argv)
-
-    # Configure logging ONLY when run as script
-    log_level = args.log.upper()
-    logging.basicConfig(
-        level=log_level, format="%(asctime)s %(levelname)s:%(name)s:%(message)s"
-    )
-    # Also configure the cmd module's logger if needed for testing
-    logging.getLogger("lsoph.backend.strace_cmd").setLevel(log_level)
-    log.info(f"Log level set to {log_level}")
-
-    target_command: Optional[List[str]] = None
-    attach_ids: Optional[List[int]] = None
-    monitor_id = "adapter_test"
-
-    if args.command:
-        if not args.command:
-            log.critical("No command provided for -c.")
-            parser.print_usage(sys.stderr)
-            return 1
-        target_command = args.command
-        monitor_id = shlex.join(target_command)
-    elif args.pids:
-        attach_ids = args.pids
-        monitor_id = f"pids_{'_'.join(map(str, attach_ids))}"
-    else:
-        log.critical("Internal error: Must provide either -c or -p.")
-        parser.print_usage(sys.stderr)
-        return 1
-
-    if os.geteuid() != 0:
-        log.warning("Running without root. strace/psutil may fail or lack permissions.")
-
-    monitor = Monitor(identifier=monitor_id)
-
-    try:
-        if target_command:
-            run(target_command, monitor)
-        elif attach_ids:
-            attach(attach_ids, monitor)
-
-        log.info("--- Final Monitored State (Adapter Test) ---")
-        tracked_files = list(monitor)
-        tracked_files.sort(key=lambda fi: fi.last_activity_ts, reverse=True)
-
-        if not tracked_files:
-            log.info("No files were tracked.")
-        else:
-            for i, file_info in enumerate(tracked_files):
-                print(f"{i+1}: {repr(file_info)}")
-                if i >= 20:
-                    print("...")
-                    break
-
-        log.info("------------------------------------------")
-        return 0
-    except (ValueError, FileNotFoundError, RuntimeError) as e:
-        log.error(f"Execution failed: {e}")
-        return 1
-    except KeyboardInterrupt:
-        log.info("\nCtrl+C detected in main.")
-        return 130
-    except Exception as e:
-        log.exception(f"An unexpected error occurred in main: {e}")
-        return 1
+# --- Async Backend Class ---
 
 
-if __name__ == "__main__":
-    sys.exit(main())
+class StraceBackend(Backend):
+    """Async backend implementation using strace."""
+
+    def __init__(self, monitor: Monitor, syscalls: list[str] = DEFAULT_SYSCALLS):
+        super().__init__(monitor)
+        self.syscalls = syscalls
+        self.syscalls = sorted(
+            list(
+                set(self.syscalls)
+                | set(PROCESS_SYSCALLS)
+                | set(EXIT_SYSCALLS)
+                | {"chdir", "fchdir"}
+            )
+        )
+
+    async def attach(self, pids: list[int]):
+        """Implementation of the attach method."""
+        if not pids:
+            log.warning("StraceBackend.attach called with no PIDs.")
+            return
+        log.info(f"Attaching strace to PIDs/TIDs: {pids}")
+        try:
+            event_stream = parse_strace_stream(
+                monitor=self.monitor,
+                should_stop=self._should_stop,
+                attach_ids=pids,
+                syscalls=self.syscalls,
+            )
+            await _process_event_stream(
+                event_stream, self.monitor, self._should_stop, initial_pids=pids
+            )
+        except asyncio.CancelledError:
+            log.info("Strace attach task cancelled.")
+        except (ValueError, FileNotFoundError, RuntimeError) as e:
+            log.error(f"Failed to start or run strace for attach: {e}")
+        except Exception as e:
+            log.exception(f"Unexpected error during strace attach processing: {e}")
+        finally:
+            log.info("Strace attach finished.")
+
+    async def run_command(self, command: list[str]):
+        """Overrides base run_command to invoke strace directly."""
+        if not command:
+            log.error("StraceBackend.run_command called with empty command.")
+            return
+        log.info(
+            f"Running command via strace: {' '.join(shlex.quote(c) for c in command)}"
+        )
+        try:
+            event_stream = parse_strace_stream(
+                monitor=self.monitor,
+                should_stop=self._should_stop,
+                target_command=command,
+                syscalls=self.syscalls,
+            )
+            await _process_event_stream(event_stream, self.monitor, self._should_stop)
+        except asyncio.CancelledError:
+            log.info("Strace run task cancelled.")
+        except (ValueError, FileNotFoundError, RuntimeError) as e:
+            log.error(f"Failed to start or run strace for run: {e}")
+        except Exception as e:
+            log.exception(f"Unexpected error during strace run processing: {e}")
+        finally:
+            log.info("Strace run finished.")

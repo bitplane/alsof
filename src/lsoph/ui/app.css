@@ -14,9 +14,13 @@ DataTable {
     width: 100%;
     /* Add a subtle border */
     border: thick $accent-darken-2;
-    /* Heavy border for focused state */
-    border-focus: heavy $accent;
 }
+
+/* Apply heavy border when DataTable has focus */
+DataTable:focus {
+    border: heavy $accent;
+}
+
 
 /* Status bar styling */
 #status-bar {

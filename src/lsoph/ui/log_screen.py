@@ -1,5 +1,5 @@
 # Filename: src/lsoph/ui/log_screen.py
-"""Modal screen for displaying application logs."""
+"""Full-screen display for application logs."""
 
 import logging
 import sys
@@ -7,58 +7,34 @@ from collections import deque
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, VerticalScroll  # Added Container
-from textual.screen import ModalScreen
-from textual.widgets import RichLog, Static  # Added Static
+
+# Removed Container import
+from textual.containers import (  # Keep VerticalScroll if needed for the log widget itself
+    VerticalScroll,
+)
+from textual.screen import Screen  # Changed from ModalScreen to Screen
+from textual.widgets import Footer, Header, RichLog, Static  # Added Header, Footer
 
 log = logging.getLogger("lsoph.ui.log")
 
 
-class LogScreen(ModalScreen[None]):
-    """A modal screen to display application logs using RichLog."""
+class LogScreen(Screen):  # Changed base class to Screen
+    """A full screen to display application logs using RichLog."""
 
     BINDINGS = [
-        Binding(
-            "escape,q,l,ctrl+l", "app.pop_screen", "Close Logs", show=True
-        ),  # Use same keys
+        Binding("escape,q,l,ctrl+l", "app.pop_screen", "Close Logs", show=True),
         Binding("c", "clear_log", "Clear", show=True),
-        Binding("up,k", "scroll_up", "Scroll Up", show=False),
-        Binding("down,j", "scroll_down", "Scroll Down", show=False),
-        Binding("pageup", "page_up", "Page Up", show=False),
-        Binding("pagedown", "page_down", "Page Down", show=False),
-        Binding("home", "scroll_home", "Scroll Home", show=False),
-        Binding("end", "scroll_end", "Scroll End", show=False),
+        # Keep scrolling bindings if needed, RichLog handles basic scrolling
+        Binding("up,k", "scroll_up()", "Scroll Up", show=False),
+        Binding("down,j", "scroll_down()", "Scroll Down", show=False),
+        Binding("pageup", "page_up()", "Page Up", show=False),
+        Binding("pagedown", "page_down()", "Page Down", show=False),
+        Binding("home", "scroll_home()", "Scroll Home", show=False),
+        Binding("end", "scroll_end()", "Scroll End", show=False),
     ]
 
-    # Add CSS for layout within the modal container
-    DEFAULT_CSS = """
-    LogScreen > Container {
-        border: thick $accent;
-        padding: 1 2; /* Add padding */
-        width: 80%;
-        height: 80%;
-        background: $surface;
-        /* Use grid for simple header/log layout */
-        grid-size: 1;
-        grid-rows: auto 1fr; /* Header row, Log row takes remaining space */
-        grid-gutter: 1;
-    }
-
-    #log-header {
-        height: auto;
-        margin-bottom: 1;
-    }
-
-    #log-scroll-container {
-        border: round $panel; /* Add border to log area */
-    }
-
-    #app-log {
-        /* Ensure log fills its container */
-        width: 100%;
-        height: 100%;
-    }
-    """
+    # Remove DEFAULT_CSS related to modal container sizing
+    # DEFAULT_CSS = """..."""
 
     def __init__(self, log_queue: deque):
         self.log_queue = log_queue
@@ -67,19 +43,17 @@ class LogScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the log screen."""
-        # Use a container for centering and styling the modal content
-        with Container(id="log-modal-container"):
-            yield Static("[bold]Application Log[/]", id="log-header")
-            # Use VerticalScroll for the log content area
-            with VerticalScroll(id="log-scroll-container"):
-                yield RichLog(
-                    id="app-log",
-                    max_lines=2000,  # Keep a reasonable buffer
-                    auto_scroll=True,
-                    wrap=False,  # Keep wrap false for potentially long lines
-                    highlight=True,
-                    markup=True,  # Enable Rich markup
-                )
+        yield Header()
+        # Directly yield the RichLog, making it fill the screen body
+        yield RichLog(
+            id="app-log",
+            max_lines=2000,
+            auto_scroll=True,
+            wrap=False,
+            highlight=True,
+            markup=True,
+        )
+        yield Footer()
 
     def on_mount(self) -> None:
         """Called when the screen is mounted. Populates with existing logs and starts timer."""
@@ -102,7 +76,6 @@ class LogScreen(ModalScreen[None]):
             )  # Check 10 times/sec
         except Exception as e:
             log.exception(f"Error during LogScreen mount: {e}")
-            # Try to display error in the log widget itself
             try:
                 log_widget.write(f"[bold red]Error mounting log screen: {e}[/]")
             except Exception:
@@ -123,21 +96,16 @@ class LogScreen(ModalScreen[None]):
         try:
             log_widget = self.query_one(RichLog)
             lines_to_write = []
-            # Efficiently drain the queue
             while True:
                 try:
                     record = self.log_queue.popleft()
                     lines_to_write.append(record)
                 except IndexError:
                     break  # Queue is empty
-            # Write collected lines
             if lines_to_write:
                 for line in lines_to_write:
                     log_widget.write(line)
-                # Optional: only scroll if auto_scroll is enabled or user is at bottom
-                # if log_widget.auto_scroll: log_widget.scroll_end(animate=False)
         except Exception as e:
-            # Avoid logging error *to the queue* if queue processing fails
             print(f"ERROR: Error processing log queue: {e}", file=sys.stderr)
 
     def action_clear_log(self) -> None:
@@ -152,6 +120,7 @@ class LogScreen(ModalScreen[None]):
             self.notify("Error clearing log.", severity="error", timeout=3)
 
     # --- Scrolling Actions ---
+    # RichLog handles scrolling internally, but bindings can target its methods
     def action_scroll_up(self) -> None:
         self.query_one(RichLog).scroll_up(animate=False)
 
