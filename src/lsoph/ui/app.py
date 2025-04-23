@@ -179,21 +179,31 @@ class LsophApp(App[None]):
 
     async def cancel_backend_worker(self):
         """Signals the backend instance to stop and cancels the Textual worker."""
+        # First, signal the backend instance itself to stop its internal loops
+        # This should handle terminating the actual strace/lsof process
+        log.debug("Calling backend_instance.stop()...")
         await self.backend_instance.stop()
-        if self._backend_worker and self._backend_worker.state == WorkerState.RUNNING:
-            log.info(
-                f"Requesting cancellation for Textual worker {self._backend_worker.name}..."
-            )
-            await self._backend_worker.cancel()
-            log.info(
-                f"Textual worker {self._backend_worker.name} cancellation requested."
-            )
-        elif self._backend_worker:
+        log.debug("Backend_instance.stop() returned.")
+
+        # Now, handle the Textual worker cancellation if it's still relevant
+        worker = self._backend_worker  # Use local variable for safety
+        if worker and worker.state == WorkerState.RUNNING:
+            log.info(f"Requesting cancellation for Textual worker {worker.name}...")
+            # Use try-except around await cancel() as it might raise errors
+            # if the worker state changes rapidly between the check and the call
+            try:
+                await worker.cancel()
+                log.info(f"Textual worker {worker.name} cancellation requested.")
+            except Exception as e:
+                log.error(f"Error cancelling Textual worker {worker.name}: {e}")
+        elif worker:
             log.debug(
-                f"Textual backend worker {self._backend_worker.name} not running (state: {self._backend_worker.state})."
+                f"Textual backend worker {worker.name} not running (state: {worker.state}). No Textual cancellation needed."
             )
         else:
             log.debug("No Textual backend worker instance to cancel.")
+        # Ensure the worker reference is cleared after handling
+        self._backend_worker = None
 
     # --- App Lifecycle ---
 
@@ -261,6 +271,8 @@ class LsophApp(App[None]):
                 severity=severity,
                 timeout=10,
             )
+            # Clear the worker reference as it's no longer valid/running
+            self._backend_worker = None
 
         # Check monitor version for table updates
         current_version = self.monitor.version
@@ -405,8 +417,8 @@ class LsophApp(App[None]):
                 new_cursor_row = min(new_cursor_row, table.row_count - 1)
                 if table.is_valid_row_index(new_cursor_row):
                     table.move_cursor(row=new_cursor_row, animate=False)
-                else:
-                    table.move_cursor(row=0, animate=False)
+                # If the only row was removed, cursor moves implicitly to -1 (no row)
+                # If multiple rows, and top row removed, cursor stays at 0 (new top row)
         except Exception as e:
             log.error(f"Error moving cursor after ignore: {e}")
 
@@ -433,6 +445,7 @@ class LsophApp(App[None]):
             table = self.query_one(DataTable)
             if table.row_count > 0:
                 table.move_cursor(row=0, animate=False)
+            # If table becomes empty, cursor is implicitly -1
         except Exception as e:
             log.error(f"Error moving cursor after ignore all: {e}")
 
