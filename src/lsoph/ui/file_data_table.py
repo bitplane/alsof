@@ -1,9 +1,14 @@
 # Filename: src/lsoph/ui/file_data_table.py
-"""A specialized DataTable widget for displaying lsoph file info."""
+"""
+A specialized DataTable widget using index-as-key for partial updates.
+NOTE: This approach uses the visual index as the RowKey, which can lead
+      to unexpected behavior if rows are added/removed in ways that disrupt
+      the expected visual order compared to the underlying data sort order.
+"""
 
 import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple  # Added Dict, Tuple, List
+from typing import Any, Dict, List, Optional, Set, Tuple  # Restored List
 
 from rich.text import Text
 from textual import events
@@ -19,15 +24,18 @@ from .emoji import get_emoji_history_string
 
 log = logging.getLogger("lsoph.ui.table")
 
-# Type alias for the visual data tuple (must match column order)
-RowVisualData = Tuple[Text, Text, Text]
+# Renamed Type alias for the visual data tuple (must match column order)
+TableRow = Tuple[Text, Text, Text]
+COLUMN_KEYS = ["history", "path", "age"]  # Order must match TableRow
 
 
 # --- Formatting Helper ---
-def _format_file_info_for_table(
+# Renamed function
+def _render_row(
     info: FileInfo, available_width: int, current_time: float
-) -> RowVisualData:  # Returns visual components directly
+) -> TableRow:  # Returns visual components directly
     """Formats FileInfo into data suitable for DataTable.add_row/update_cell."""
+    # (Implementation remains the same)
 
     # --- Get Emoji History ---
     MAX_EMOJI_HISTORY = 5  # Keep consistent with column width
@@ -77,21 +85,24 @@ def _format_file_info_for_table(
 class FileDataTable(DataTable):
     """
     A DataTable specialized for displaying and managing FileInfo.
-    Uses full refresh for updates to maintain sort order, with robust cursor handling.
+    Uses stringified index as RowKey and attempts partial updates.
+    Simplified error handling and logging.
+    Attempts to maintain relative cursor screen position during updates.
     """
 
-    RECENT_COL_WIDTH = 8
-    AGE_COL_WIDTH = 5
-    SCROLLBAR_WIDTH = 2  # User's estimate
-    COLUMN_PADDING = 2  # User's estimate
+    RECENT_COL_WIDTH = 8  # Width for emoji history (e.g., 5 emojis + padding)
+    AGE_COL_WIDTH = 5  # width of the age column
+    SCROLLBAR_WIDTH = 2  # just a guess 🤷
+    COLUMN_PADDING = 2  # User's estimate for padding per column
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.cursor_type = "row"
         self.zebra_stripes = True
-        # Store row keys in the visual order they were *last added*
-        # Used for cursor fallback logic
-        self._current_visual_keys: List[RowKey] = []
+        # Renamed: Stores the list of paths in the order they were last displayed
+        self._paths: List[str] = []
+        # Renamed type alias used in Dict value
+        self._row_data_cache: Dict[str, TableRow] = {}  # Key is str(index)
 
     def on_mount(self) -> None:
         """Set up columns on mount."""
@@ -103,12 +114,10 @@ class FileDataTable(DataTable):
         self.add_column("Age", key="age", width=self.AGE_COL_WIDTH)
         # Explicitly disable auto_width for the path column to respect our calculation
         self.columns["path"].auto_width = False
-        log.debug(
-            f"FileDataTable mounted. Initial path width set to {initial_path_width}"
-        )
 
     def _get_path_column_width(self):
         """Calculates the desired width for the path column based on user's logic."""
+        # Assume self.size is valid when this is called
         w = self.size.width - self.SCROLLBAR_WIDTH
         w -= len(self.columns) * self.COLUMN_PADDING
         calculated_width = w - self.RECENT_COL_WIDTH - self.AGE_COL_WIDTH
@@ -116,164 +125,221 @@ class FileDataTable(DataTable):
 
     @property
     def selected_path(self) -> Optional[str]:
-        """Returns the full path (RowKey value) of the currently selected row."""
-        try:
-            coordinate = self.cursor_coordinate
-            if not self.is_valid_coordinate(coordinate):
-                return None
-            cell_key: Optional[CellKey] = self.coordinate_to_cell_key(coordinate)
-            row_key_obj = cell_key.row_key if cell_key else None
-            if row_key_obj and row_key_obj.value is not None:
-                return str(row_key_obj.value)
-        except Exception as e:
-            log.error(f"Error getting selected path from FileDataTable: {e}")
-        return None
+        """Returns the path string of the data visually at the cursor row."""
+        # Simplified: relies on cursor_row being valid or index check failing
+        idx = self.cursor_row
+        # Use renamed internal list
+        # Allow IndexError if idx >= len(...)
+        if idx >= 0 and idx < len(self._paths):
+            return self._paths[idx]
+        return None  # Return None if index invalid (< 0)
 
     def on_resize(self, event: events.Resize) -> None:
         """Update path column width on resize."""
         new_width = self._get_path_column_width()
         path_column = self.columns.get("path")
+        # Check column exists before accessing width
         if path_column and path_column.width != new_width:
             path_column.width = new_width
-            log.debug(
-                f"*** FileDataTable RESIZE: New path width {new_width} (event size {event.size.width}) ***"
-            )
-            # Refresh might be needed if header/content doesn't redraw correctly automatically
-            # self.refresh()
+            # Update text widths immediately after resize
+            self._refresh_path_text()  # Renamed method call
+            self.refresh()  # Refresh after resize and text update
 
-    def update_data(self, sorted_file_infos: list[FileInfo]) -> None:
+    # Renamed method
+    def _refresh_path_text(self):
+        """Force recalculation of path text for all rows after resize."""
+        path_text_width = self._get_path_column_width()
+        current_keys = list(self.rows.keys())
+        for row_key_obj in current_keys:
+            # Allow errors below to propagate if key is invalid or state inconsistent
+            if row_key_obj.value is None:
+                continue
+            cache_key = str(row_key_obj.value)
+            try:  # Add try block for int conversion
+                idx_key = int(cache_key)  # Expect value to be convertible int
+            except ValueError:
+                # log.warning(f"Invalid index key value '{cache_key}' during text refresh.")
+                continue  # Skip if key is not an integer index
+
+            # Use renamed type alias
+            cached_data: Optional[TableRow] = self._row_data_cache.get(cache_key)
+
+            # Allow IndexError if idx_key is out of bounds for _paths
+            # Check lower bound explicitly
+            if cached_data and idx_key >= 0 and idx_key < len(self._paths):
+                original_path = self._paths[idx_key]  # Use renamed list
+                new_path_text = Text(
+                    short_path(original_path, max(1, path_text_width)),
+                    style=cached_data[1].style,
+                )
+                if new_path_text.plain != cached_data[1].plain:
+                    # Allow KeyError if row was removed concurrently
+                    self.update_cell(
+                        cache_key, "path", new_path_text, update_width=False
+                    )
+                    self._row_data_cache[cache_key] = (
+                        cached_data[0],
+                        new_path_text,
+                        cached_data[2],
+                    )
+
+    # Renamed method
+    def _find_cursor_pos(
+        self,
+        old_idx: int,  # Renamed parameter
+        old_paths: List[str],  # Renamed parameter
+        new_paths: List[str],  # Renamed parameter
+    ) -> int:
         """
-        Updates the table content using a full refresh to maintain sort order,
-        and robustly restores the cursor position.
+        Finds the new target index for the cursor. Returns -1 if no
+        logical target can be found based on the previous selection.
+        """
+        selected_path_before: Optional[str] = None
+        # Check bounds BEFORE accessing old_paths
+        if old_idx >= 0 and old_idx < len(old_paths):
+            selected_path_before = old_paths[old_idx]
+
+        if not selected_path_before:
+            # No valid selection before, return -1
+            return -1
+
+        path_map = {path: i for i, path in enumerate(new_paths)}
+
+        # 1. Check if original selected path still exists
+        if selected_path_before in path_map:
+            return path_map[selected_path_before]
+
+        # 2. Search backwards up the *previous* list for an item that *still exists*
+        for current_check_pos in range(old_idx - 1, -1, -1):
+            # Allow potential IndexError if old_idx was invalid relative to old_paths
+            path = old_paths[current_check_pos]
+            if path in path_map:
+                return path_map[path]  # Return the *new* index of the item found above
+
+        # 3. If nothing found above, return -1 (no logical target)
+        # Corrected comment: Caller handles the -1 case.
+        return -1
+
+    # Renamed parameter sorted_file_infos -> infos
+    def update_data(self, infos: list[FileInfo]) -> None:
+        """
+        Updates the table content using index as key and attempting partial updates.
+        Attempts to maintain relative cursor screen position.
         """
         current_time = time.time()
-        log.debug(f"Starting full refresh update with {len(sorted_file_infos)} items.")
 
-        # --- Preserve Cursor State (Key and Index) ---
-        selected_key_before_update: Optional[RowKey] = None
-        selected_path_str = self.selected_path  # Get the string path
-        if selected_path_str:
-            selected_key_before_update = RowKey(selected_path_str)
+        # --- Preserve Cursor State & Calculate Target Scroll ---
+        # Renamed variables
+        old_idx = self.cursor_row
+        old_paths = self._paths  # Use internal state directly, no need to copy list()
+        old_count = len(old_paths)
+        old_scroll_y = self.scroll_y
+        cursor_screen_offset = -1
 
-        selected_index_before_update = self.cursor_row
-        # Store the key order *before* clearing
-        previous_visual_keys = list(
-            self.rows.keys()
-        )  # Get keys in current visual order
+        if old_idx >= 0:
+            cursor_screen_offset = old_idx - old_scroll_y
 
-        log.debug(
-            f"Cursor before update: Key='{selected_key_before_update}', Index={selected_index_before_update}"
-        )
+        # --- Prepare New State ---
+        # Renamed variables
+        new_paths = [info.path for info in infos]
+        new_info_map = {info.path: info for info in infos}
+        new_count = len(new_paths)
+
+        # --- Calculate Target Cursor Index ---
+        # Renamed variables and method call
+        target_cursor_index = self._find_cursor_pos(old_idx, old_paths, new_paths)
+
+        # --- Attempt to Scroll Viewport *BEFORE* Updates ---
+        if target_cursor_index != -1 and cursor_screen_offset != -1:
+            target_scroll_y = max(0, target_cursor_index - cursor_screen_offset)
+            max_scroll = max(0, new_count - self.size.height)
+            target_scroll_y = min(target_scroll_y, max_scroll)
+            if self.scroll_y != target_scroll_y:
+                # Allow potential errors during scroll setting to propagate
+                self.scroll_y = target_scroll_y
+        # --- End Pre-Update Scroll ---
 
         # --- Calculate width for text formatting ---
         path_text_width = self._get_path_column_width()
-        # Ensure column width is also up-to-date
+        # Ensure column width is up-to-date
         path_column = self.columns.get("path")
         if path_column and path_column.width != path_text_width:
             path_column.width = path_text_width
 
-        # --- Full Refresh Implementation ---
-        self.clear()
-        new_visual_keys: List[RowKey] = []
-        new_key_to_index_map: Dict[RowKey, int] = {}
+        # --- Diff and Update ---
+        # Use renamed type alias
+        new_data_cache: Dict[str, TableRow] = {}
+        rows_updated = 0
+        rows_added = 0
+        rows_removed = 0
 
-        for idx, info in enumerate(sorted_file_infos):
-            row_key_value = info.path
-            row_key = RowKey(row_key_value)
+        # 1. Update/Overwrite existing visual slots
+        update_limit = min(old_count, new_count)
+        for i in range(update_limit):
+            index_key = str(i)
+            new_path = new_paths[i]
+            # Allow KeyError if path somehow not in map (indicates inconsistency)
+            new_info = new_info_map[new_path]
 
-            # Format data for the row using the current column width for path text shortening
-            recent_text, path_text, age_text = _format_file_info_for_table(
-                info, path_text_width, current_time
-            )
-            row_data = (recent_text, path_text, age_text)
+            # Use renamed function _render_row
+            new_visuals = _render_row(new_info, path_text_width, current_time)
+            new_data_cache[index_key] = new_visuals
 
-            try:
-                self.add_row(*row_data, key=row_key_value)
-                new_visual_keys.append(row_key)  # Store keys in the new visual order
-                new_key_to_index_map[row_key] = idx
-            except KeyError:
-                log.warning(f"Attempted to add duplicate row key: {row_key_value}")
-            except Exception as add_exc:
-                log.exception(f"Error adding row for key {row_key_value}: {add_exc}")
-
-        self._current_visual_keys = (
-            new_visual_keys  # Update internal state AFTER adding rows
-        )
-        # --- End Full Refresh ---
-
-        # --- Restore Cursor ---
-        target_key_to_select: Optional[RowKey] = None
-        final_cursor_index = -1
-
-        if selected_key_before_update:
-            # Check if the originally selected key still exists in the new data
-            if selected_key_before_update in new_key_to_index_map:
-                target_key_to_select = selected_key_before_update
-                log.debug(
-                    f"Original selected key '{target_key_to_select.value}' still exists."
-                )
-            else:
-                # Original key is gone (deleted/ignored). Find the key that was visually above it.
-                log.debug(
-                    f"Original selected key '{selected_key_before_update.value}' is gone."
-                )
-                # Use the key order from *before* the clear operation
-                if (
-                    selected_index_before_update > 0
-                    and selected_index_before_update <= len(previous_visual_keys)
-                ):
-                    # Get the key that was visually at the index *above* the old selection
-                    key_above_before_update = previous_visual_keys[
-                        selected_index_before_update - 1
-                    ]
-                    log.debug(
-                        f"Trying fallback key (was above): '{key_above_before_update.value}'"
+            # Use renamed type alias
+            old_visuals: Optional[TableRow] = self._row_data_cache.get(index_key)
+            if new_visuals != old_visuals:
+                # Allow KeyError if row 'i' doesn't exist when expected
+                for col_idx, col_key_str in enumerate(COLUMN_KEYS):
+                    self.update_cell(
+                        index_key,
+                        col_key_str,
+                        new_visuals[col_idx],
+                        update_width=False,
                     )
-                    # Check if *this* key still exists in the new data map
-                    if key_above_before_update in new_key_to_index_map:
-                        target_key_to_select = key_above_before_update
-                    else:
-                        log.debug(
-                            f"Fallback key '{key_above_before_update.value}' also not found in new map."
-                        )
-                else:
-                    log.debug(
-                        "Original selection was at index 0 or invalid, cannot get key above."
-                    )
+                rows_updated += 1
 
-        # If we found a target key (original or fallback), find its new index
-        if target_key_to_select:
-            final_cursor_index = new_key_to_index_map.get(target_key_to_select, -1)
-            if final_cursor_index != -1:
-                log.debug(
-                    f"Target key '{target_key_to_select.value}' found at new index {final_cursor_index}."
-                )
-            else:
-                # This shouldn't happen if the key is in the map, but handle defensively
-                log.warning(
-                    f"Target key '{target_key_to_select.value}' was in map but index lookup failed?"
-                )
+        # 2. Add new rows if new list is longer
+        if new_count > old_count:
+            for i in range(old_count, new_count):
+                index_key = str(i)
+                new_path = new_paths[i]
+                new_info = new_info_map[new_path]  # Allow KeyError
+                # Use renamed function _render_row
+                new_visuals = _render_row(new_info, path_text_width, current_time)
+                new_data_cache[index_key] = new_visuals
+                # Allow KeyError if key 'i' somehow already exists
+                self.add_row(*new_visuals, key=index_key)
+                rows_added += 1
 
-        # If no target key determined (original gone, fallback gone/failed), or index lookup failed,
-        # try to select the top row if the table is not empty.
-        if final_cursor_index == -1 and self.row_count > 0:
-            log.debug("No target key found or index lookup failed, selecting row 0.")
-            final_cursor_index = 0
+        # 3. Remove extra rows if new list is shorter
+        elif old_count > new_count:
+            for i in range(old_count - 1, new_count - 1, -1):
+                index_key = str(i)
+                # Allow KeyError if row 'i' doesn't exist
+                self.remove_row(index_key)
+                rows_removed += 1
+                self._row_data_cache.pop(index_key, None)
 
-        # Move cursor if a valid index was determined
-        if final_cursor_index != -1:
-            try:
-                if self.is_valid_row_index(final_cursor_index):
-                    self.move_cursor(row=final_cursor_index, animate=False)
-                    log.debug(f"Moved cursor to index {final_cursor_index}.")
-                else:
-                    log.warning(
-                        f"Calculated final cursor index {final_cursor_index} is invalid for row_count {self.row_count}."
-                    )
-            except Exception as e:
-                log.error(f"Error moving cursor to row {final_cursor_index}: {e}")
-        else:
-            log.debug("No valid cursor index determined (table might be empty).")
-        # --- End Restore Cursor ---
+        # Update internal state caches
+        # Renamed variable
+        self._paths = new_paths
+        self._row_data_cache = new_data_cache
 
-        log.debug("Full refresh update finished.")
+        # --- Move Cursor ---
+        if target_cursor_index != -1:
+            final_row_count = self.row_count
+            if target_cursor_index < final_row_count:
+                if self.cursor_row != target_cursor_index:
+                    self.move_cursor(row=target_cursor_index, animate=False)
+            # REMOVED automatic move to 0 if target is out of bounds
+            # Let the cursor stay where it is if the target is invalid
+            elif final_row_count <= 0:
+                # If table becomes empty, cursor is implicitly invalid, do nothing
+                pass
+            # else: # Reduced logging
+            # Target index is out of bounds, but table not empty.
+            # log.warning(f"Target cursor index {target_cursor_index} out of bounds after update (row_count={final_row_count}). Cursor not moved.")
+
+        # If target_cursor_index was -1, cursor is not moved.
+
+        self.refresh()
