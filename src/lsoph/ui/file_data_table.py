@@ -26,10 +26,11 @@ def _format_file_info_for_table(
     """Formats FileInfo into data suitable for DataTable.add_row/update_cell."""
 
     # --- Get Emoji History ---
-    # Define max length for emoji string
-    MAX_EMOJI_HISTORY = 5
+    MAX_EMOJI_HISTORY = 5  # Keep consistent with column width
     emoji_history_str = get_emoji_history_string(info, MAX_EMOJI_HISTORY)
     # --- End Emoji History ---
+
+    # REMOVED redundant single emoji calculation logic block
 
     # Shorten path display *text* using the calculated available width
     # Ensure available_width is at least 1 for short_path
@@ -51,26 +52,21 @@ def _format_file_info_for_table(
     if info.status == "deleted":
         style = "strike"
     elif info.last_error_enoent:
-        style = "dim strike"  # File likely doesn't exist anymore
+        style = "dim strike"
     elif info.status == "error":
         style = "red"
     elif info.is_open:
-        # Apply green slightly differently if active vs just open
-        style = "green" if info.status == "active" else ""  # Bold removed for now
-    elif info.status == "active":  # Should be caught by is_open, but safety
+        style = "green" if info.status == "active" else ""
+    elif info.status == "active":
         style = "green"
-    # Highlight recent stat calls slightly? Maybe not needed with emoji history.
-    # elif info.last_event_type == "STAT" and not info.is_open:
-    #     style = "yellow"
-    elif age_seconds > 60:  # Dim older entries
+    elif age_seconds > 60:
         style = "dim"
 
     # Create Text objects with styles
-    # Pad emoji string slightly for visual separation
-    # No specific style needed for emoji string itself, handled by content
-    recent_text = Text(f" {emoji_history_str} ")
+    # Use the emoji_history_str directly
+    recent_text = Text(f" {emoji_history_str} ")  # Pad slightly
     path_text = Text(path_display, style=style)
-    age_text = Text(age_str.rjust(4), style=style)  # Pad for alignment
+    age_text = Text(age_str.rjust(4), style=style)
 
     return recent_text, path_text, age_text
 
@@ -90,14 +86,11 @@ class FileDataTable(DataTable):
         super().__init__(*args, **kwargs)
         self.cursor_type = "row"
         self.zebra_stripes = True
-        # Internal state tracking
-        self._current_row_keys: list[RowKey] = []  # Stores keys in visual order
+        self._current_row_keys: list[RowKey] = []
 
     def on_mount(self) -> None:
         """Set up columns on mount."""
-        # Renamed first column, adjusted width
         self.add_column("Recent", key="history", width=self.RECENT_COL_WIDTH)
-        # Set an initial width for Path column to prevent collapse
         self.add_column("Path", key="path", width=self.DEFAULT_PATH_WIDTH)
         self.add_column("Age", key="age", width=self.AGE_COL_WIDTH)
 
@@ -113,14 +106,13 @@ class FileDataTable(DataTable):
             if row_key_obj is not None and row_key_obj.value is not None:
                 return str(row_key_obj.value)
         except Exception as e:
-            # Keep error log for debugging selection issues
             log.error(f"Error getting selected path from FileDataTable: {e}")
         return None
 
     def update_data(self, sorted_file_infos: list[FileInfo]) -> None:
         """
         Updates the table content based on the new list of sorted FileInfo objects.
-        Currently implements a full refresh, but designed for future partial updates.
+        Calculates path column width based on available scrollable region.
         """
         current_time = time.time()
 
@@ -129,24 +121,36 @@ class FileDataTable(DataTable):
         selected_index_before_update = self.cursor_row
 
         # --- Calculate and Update Path Column Width ---
-        other_cols_width = self.RECENT_COL_WIDTH + self.AGE_COL_WIDTH
-        # Get container width, fallback to screen width if needed (though container is better)
-        container_width = self.container_size.width or self.app.size.width
-        # Estimate padding/separators (e.g., 1 space between each column + borders)
-        # A simple estimate might be num_columns + 1
-        padding_estimate = len(self.columns) + 1
-        available_width_for_column = max(
-            1, container_width - other_cols_width - padding_estimate
-        )
+        try:
+            # Get the width of the area where content can actually be drawn
+            content_width = self.scrollable_content_region.width
+            other_cols_width = self.RECENT_COL_WIDTH + self.AGE_COL_WIDTH
+            # Estimate padding for column separators (number of columns - 1)
+            padding_estimate = max(0, len(self.columns) - 1)
+            # Calculate available width, ensuring it's at least 1
+            available_width_for_column = max(
+                1, content_width - other_cols_width - padding_estimate
+            )
 
-        path_column = self.columns.get("path")
-        if path_column and path_column.width != available_width_for_column:
-            # Set the calculated width directly
-            path_column.width = available_width_for_column
-            log.debug(f"Updating path column width to {available_width_for_column}")
-        elif not path_column:
-            log.error("Path column not found in FileDataTable during width update!")
-            return
+            path_column = self.columns.get("path")
+            if path_column and path_column.width != available_width_for_column:
+                path_column.width = available_width_for_column
+                # Reduced logging
+                # log.debug(f"Updating path column width to {available_width_for_column} based on scrollable region")
+            elif not path_column:
+                log.error("Path column not found in FileDataTable during width update!")
+                return  # Cannot proceed without path column
+            else:
+                # If width hasn't changed, use the current column width for text formatting
+                available_width_for_column = path_column.width
+
+        except Exception as e:
+            log.exception(f"Error calculating path column width: {e}")
+            # Fallback or default width if calculation fails
+            available_width_for_column = self.DEFAULT_PATH_WIDTH
+            path_column = self.columns.get("path")
+            if path_column:
+                path_column.width = available_width_for_column
         # --- End Width Calculation/Update ---
 
         # --- Full Refresh Implementation ---
