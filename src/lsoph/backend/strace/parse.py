@@ -261,7 +261,7 @@ def _parse_strace_line(
         except ValueError:
             log.warning(f"Could not parse PID digits from: {pid_match.group(1)!r}")
             return None
-        line_bytes = line_bytes[pid_match.end() :].lstrip()
+        line_remainder_bytes = line_bytes[pid_match.end() :].lstrip()
     else:
         # Ignore signals or lines without PID
         if (
@@ -273,83 +273,111 @@ def _parse_strace_line(
         return None
 
     # 2. Extract Timestamp
-    ts_match = TIMESTAMP_RE.match(line_bytes)
+    ts_match = TIMESTAMP_RE.match(line_remainder_bytes)
     if ts_match:
         try:
             timestamp = float(ts_match.group(1))
         except ValueError:
             pass
-        line_bytes = line_bytes[ts_match.end() :].lstrip()
+        line_remainder_bytes = line_remainder_bytes[ts_match.end() :].lstrip()
     event_timestamp = timestamp if timestamp is not None else current_time
 
-    # 3. Handle special line types (unfinished, resumed, signal)
-    unfinished_match = UNFINISHED_RE.search(line_bytes)
-    if unfinished_match:
-        syscall_part_bytes = line_bytes[: unfinished_match.start()].strip()
-        syscall_name_bytes = syscall_part_bytes.split(b"(", 1)[0]
-        try:
-            syscall_name_str = syscall_name_bytes.decode("ascii")
-            unfinished_syscalls[pid] = syscall_name_str
-        except UnicodeDecodeError:
-            log.warning(
-                f"Could not decode unfinished syscall name: {syscall_name_bytes!r}"
-            )
-        return None  # Don't yield unfinished events
+    # --- FIX: Reorder checks and ensure return ---
 
-    resumed_match = RESUMED_RE.match(line_bytes)
+    # 3a. Handle Resumed lines
+    resumed_match = RESUMED_RE.match(line_remainder_bytes)
     if resumed_match:
         try:
             syscall_name_str = resumed_match.group("syscall").decode("ascii")
             if unfinished_syscalls.get(pid) == syscall_name_str:
                 del unfinished_syscalls[pid]
-                remainder_bytes = resumed_match.group(2).strip()
-                # Parse result from the remainder
-                result_data = _parse_result_part(remainder_bytes)
-                result_int = helpers.parse_result_int(result_data["result_str"])
+                remainder_after_resumed = resumed_match.group(2).strip()
+                # --- Add try-except around result parsing ---
+                try:
+                    result_data = _parse_result_part(remainder_after_resumed)
+                    result_int = helpers.parse_result_int(result_data["result_str"])
 
-                return Syscall(
-                    pid=pid,
-                    syscall=syscall_name_str,
-                    args=[],  # No args on resumed line
-                    result_str=result_data["result_str"],
-                    result_int=result_int,
-                    child_pid=None,  # Cannot determine from resumed line
-                    error_name=result_data["error_name"],
-                    error_msg=result_data["error_msg"],
-                    timing=result_data["timing"],
-                    timestamp=event_timestamp,
-                    raw_line=original_line_bytes,
-                )
+                    return Syscall(  # Return on success
+                        pid=pid,
+                        syscall=syscall_name_str,
+                        args=[],  # No args on resumed line
+                        result_str=result_data["result_str"],
+                        result_int=result_int,
+                        child_pid=None,
+                        error_name=result_data["error_name"],
+                        error_msg=result_data["error_msg"],
+                        timing=result_data["timing"],
+                        timestamp=event_timestamp,
+                        raw_line=original_line_bytes,
+                    )
+                except (
+                    Exception
+                ) as e_resumed:  # Catch potential errors during result parsing
+                    log.exception(
+                        f"Error parsing result for resumed syscall {syscall_name_str} (PID {pid}): {e_resumed}. Remainder: {remainder_after_resumed!r}"
+                    )
+                    return None  # Return None if result parsing fails
+                # --- End try-except ---
             else:
                 log.warning(
                     f"Resumed syscall '{syscall_name_str}' for PID {pid} without matching unfinished call. Stored: {unfinished_syscalls.get(pid)}"
                 )
-                return None
+                return None  # Ignore mismatched resumption
         except UnicodeDecodeError:
             log.warning(
                 f"Could not decode resumed syscall name: {resumed_match.group('syscall')!r}"
             )
-            return None
+            return None  # Return None on decode error
 
-    # If it's not unfinished or resumed, treat as a regular line attempt
-    # 4. Find syscall name, arguments, and result part manually
+    # 3b. Handle Unfinished lines
+    unfinished_match = UNFINISHED_RE.search(line_remainder_bytes)
+    if unfinished_match:
+        syscall_part_bytes = line_remainder_bytes[: unfinished_match.start()].strip()
+        open_paren_pos = syscall_part_bytes.find(b"(")
+        if open_paren_pos != -1:
+            syscall_name_bytes = syscall_part_bytes[:open_paren_pos]
+            try:
+                syscall_name_str = syscall_name_bytes.decode("ascii")
+                unfinished_syscalls[pid] = syscall_name_str
+            except UnicodeDecodeError:
+                log.warning(
+                    f"Could not decode unfinished syscall name: {syscall_name_bytes!r}"
+                )
+        else:
+            log.warning(
+                f"Could not find '(' in unfinished line part: {syscall_part_bytes!r}"
+            )
+        return None  # Don't yield unfinished events
+
+    # 3c. Handle Signal lines
+    signal_match = SIGNAL_RE.match(line_remainder_bytes)
+    if signal_match:
+        if pid in unfinished_syscalls:
+            del unfinished_syscalls[pid]  # Clear any pending unfinished on signal
+        return None  # Ignore signal lines
+
+    # --- END FIX ---
+
+    # 4. If none of the above, attempt to parse as a regular syscall line
     syscall_name_str: str | None = None
     args_bytes_list: List[bytes] = []
     result_data = {}
 
     try:
-        open_paren_pos = line_bytes.find(b"(")
+        # Use the remainder after PID/Timestamp stripping
+        open_paren_pos = line_remainder_bytes.find(b"(")
         if open_paren_pos != -1:
-            syscall_name_bytes = line_bytes[:open_paren_pos]
+            syscall_name_bytes = line_remainder_bytes[:open_paren_pos]
             syscall_name_str = syscall_name_bytes.decode("ascii")
 
-            # Find matching closing parenthesis (handle potential nesting - basic)
+            # Find matching closing parenthesis in the remainder
             close_paren_pos = -1
             paren_level = 0
             in_str_quote = False
             esc = False
-            for i in range(open_paren_pos + 1, len(line_bytes)):
-                char = line_bytes[i : i + 1]
+            # Start search *after* the opening parenthesis found
+            for i in range(open_paren_pos + 1, len(line_remainder_bytes)):
+                char = line_remainder_bytes[i : i + 1]
                 if esc:
                     esc = False
                 elif char == b"\\":
@@ -365,23 +393,45 @@ def _parse_strace_line(
                     paren_level -= 1
 
             if close_paren_pos != -1:
-                args_raw_bytes = line_bytes[open_paren_pos + 1 : close_paren_pos]
+                # Extract args from between the parentheses
+                args_raw_bytes = line_remainder_bytes[
+                    open_paren_pos + 1 : close_paren_pos
+                ]
                 args_bytes_list = _parse_args_bytes(args_raw_bytes)
 
-                # Look for result part after the closing parenthesis
-                result_part_bytes = line_bytes[close_paren_pos + 1 :]
+                # Look for result part *after* the closing parenthesis
+                result_part_bytes = line_remainder_bytes[close_paren_pos + 1 :]
                 result_data = _parse_result_part(result_part_bytes)
             else:
-                log.debug(
-                    f"Could not find matching ')' for syscall line: {original_line_bytes!r}"
-                )
-                return None  # Malformed line
+                # Could be a syscall with no args and no result (e.g., getpid())
+                # Or could be malformed. Check if there's an '=' after name.
+                if b"=" not in line_remainder_bytes[open_paren_pos:]:
+                    log.debug(
+                        f"Syscall line with no apparent args or result: {original_line_bytes!r}"
+                    )
+                    # Assume no args, no result for now
+                    args_bytes_list = []
+                    result_data = {
+                        "result_str": None,
+                        "error_name": None,
+                        "error_msg": None,
+                        "timing": None,
+                    }
+                else:
+                    # Found '=' but no closing ')' - likely malformed
+                    log.debug(
+                        f"Could not find matching ')' for syscall line: {original_line_bytes!r}"
+                    )
+                    return None  # Malformed line
         else:
+            # No opening parenthesis found - likely not a standard syscall line
             log.debug(f"Could not find '(' for syscall line: {original_line_bytes!r}")
             return None  # Malformed line
 
     except UnicodeDecodeError:
-        log.warning(f"Could not decode syscall name: {line_bytes[:open_paren_pos]!r}")
+        log.warning(
+            f"Could not decode syscall name: {line_remainder_bytes[:open_paren_pos]!r}"
+        )
         return None
     except Exception as e:
         log.exception(
