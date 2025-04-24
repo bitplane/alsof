@@ -165,6 +165,7 @@ class LsophApp(App[None]):
         if not self._file_table:
             return
         if new_version > old_version:
+            # log.debug(f"Monitor version changed ({old_version} -> {new_version}), calling table update.") # Reduced noise
             all_files = list(self.monitor)
             active_files = [
                 info
@@ -224,9 +225,7 @@ class LsophApp(App[None]):
         """Handle row selection (Enter key) - show details."""
         # Check if the event came from the main file table
         if event.control is self._file_table:
-            log.debug(
-                f"DataTable Row Selected (Enter) from main table: {event.row_key}"
-            )
+            # log.debug(f"DataTable Row Selected (Enter) from main table: {event.row_key}") # Reduced noise
             # Call the internal method directly, bypassing focus check
             self._show_detail_for_selected_row()
         # else: log.debug("Ignoring row selection event from other source.")
@@ -235,9 +234,7 @@ class LsophApp(App[None]):
         """Handle row activation (Double Click) - show details."""
         # Check if the event came from the main file table
         if event.control is self._file_table:
-            log.debug(
-                f"DataTable Row Activated (Double Click) from main table: {event.row_key}"
-            )
+            # log.debug(f"DataTable Row Activated (Double Click) from main table: {event.row_key}") # Reduced noise
             # Call the internal method directly, bypassing focus check
             self._show_detail_for_selected_row()
         # else: log.debug("Ignoring row activation event from other source.")
@@ -257,7 +254,7 @@ class LsophApp(App[None]):
         # Check if the table itself or one of its descendants has focus
         # Also check if the main app screen is the current one
         if self.screen is not self:
-            return False
+            return False  # Keep screen check here
         if not self._file_table.has_focus and not self.focused_descendant_is_widget(
             self._file_table
         ):
@@ -266,12 +263,8 @@ class LsophApp(App[None]):
 
     def action_ignore_selected(self) -> None:
         """Action to ignore the currently selected file path."""
-        # --- REMOVED FOCUS CHECK ---
-        # if not self._ensure_table_focused(): return
-        # --- ADDED SCREEN CHECK ---
-        if self.screen is not self:
-            log.debug("Ignoring action_ignore_selected as modal screen is active.")
-            return
+        if not self._file_table:
+            return  # Ensure table exists
 
         path_to_ignore = self._file_table.selected_path
         if not path_to_ignore:
@@ -280,16 +273,15 @@ class LsophApp(App[None]):
 
         log.info(f"Ignoring selected path: {path_to_ignore}")
         self.monitor.ignore(path_to_ignore)
+        # --- Force Update ---
+        self.last_monitor_version = self.monitor.version
+        # --- End Force Update ---
         self.notify(f"Ignored: {short_path(path_to_ignore, 60)}", timeout=2)
 
     def action_ignore_all(self) -> None:
         """Action to ignore all currently tracked files."""
-        # --- REMOVED FOCUS CHECK ---
-        # if not self._ensure_table_focused(): return
-        # --- ADDED SCREEN CHECK ---
-        if self.screen is not self:
-            log.debug("Ignoring action_ignore_all as modal screen is active.")
-            return
+        if not self._file_table:
+            return  # Ensure table exists
 
         log.info("Ignoring all tracked files.")
         count_before = len(
@@ -299,6 +291,9 @@ class LsophApp(App[None]):
             self.notify("No active files to ignore.", timeout=2)
             return
         self.monitor.ignore_all()
+        # --- Force Update ---
+        self.last_monitor_version = self.monitor.version
+        # --- End Force Update ---
         self.notify(f"Ignoring {count_before} currently tracked files.", timeout=2)
 
     def action_show_log(self) -> None:
@@ -326,7 +321,7 @@ class LsophApp(App[None]):
 
         path = self._file_table.selected_path
         if not path:
-            log.debug("_show_detail_for_selected_row called but no path selected.")
+            # log.debug("_show_detail_for_selected_row called but no path selected.") # Reduced noise
             return
 
         log.debug(f"Showing details for selected path: {path}")
@@ -343,31 +338,24 @@ class LsophApp(App[None]):
 
     def action_scroll_home(self) -> None:
         """Scrolls the file table to the top."""
-        # Add screen check
-        if self.screen is not self or not self._file_table:
-            return
-        log.debug("Action: scroll_home")
-        self._file_table.scroll_home(animate=False)
-        if self._file_table.row_count > 0:
-            self._file_table.move_cursor(row=0, animate=False)
+        if self._file_table:
+            # log.debug("Action: scroll_home") # Reduced noise
+            self._file_table.scroll_home(animate=False)
+            if self._file_table.row_count > 0:
+                self._file_table.move_cursor(row=0, animate=False)
 
     def action_scroll_end(self) -> None:
         """Scrolls the file table to the bottom."""
-        # Add screen check
-        if self.screen is not self or not self._file_table:
-            return
-        log.debug("Action: scroll_end")
-        self._file_table.scroll_end(animate=False)
-        if self._file_table.row_count > 0:
-            self._file_table.move_cursor(
-                row=self._file_table.row_count - 1, animate=False
-            )
+        if self._file_table:
+            # log.debug("Action: scroll_end") # Reduced noise
+            self._file_table.scroll_end(animate=False)
+            if self._file_table.row_count > 0:
+                self._file_table.move_cursor(
+                    row=self._file_table.row_count - 1, animate=False
+                )
 
     def action_dump_monitor(self) -> None:
         """Debug action to dump monitor state to log."""
-        # This is a debug action, likely okay without screen check, but added for consistency
-        if self.screen is not self:
-            return
         log.debug("--- Monitor State Dump ---")
         try:
             log.debug(f"Identifier: {self.monitor.identifier}")
