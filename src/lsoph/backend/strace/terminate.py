@@ -7,7 +7,7 @@ import logging
 log = logging.getLogger(__name__)  # Use module-specific logger
 
 
-async def _terminate_strace_process(
+async def terminate_strace_process(
     process: asyncio.subprocess.Process | None, pid: int
 ):
     """Helper to terminate the strace process robustly."""
@@ -95,7 +95,3 @@ async def _terminate_strace_process(
             log.warning(f"Strace process {pid} already exited before SIGKILL.")
         except Exception as kill_err:
             log.exception(f"Error during SIGKILL for strace {pid}: {kill_err}")
-
-
-# Expose the function for import
-terminate_strace_process = _terminate_strace_process
