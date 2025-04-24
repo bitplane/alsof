@@ -6,65 +6,65 @@ import logging
 import os
 import shlex
 import sys
-from collections.abc import Callable, Coroutine
-from typing import Any
+from collections.abc import Coroutine
+from typing import Any, Type
 
-# Import backend modules AND their backend classes
-from lsoph.backend import lsof, psutil, strace
-
-# Import the corrected base backend class
-from lsoph.backend.base import Backend
-from lsoph.backend.lsof import LsofBackend
-from lsoph.backend.psutil import PsutilBackend
-from lsoph.backend.strace import StraceBackend
+# Import backend base class and the discovered backends dictionary
+from lsoph.backend import BACKENDS, Backend  # Import BACKENDS dict
 from lsoph.log import LOG_QUEUE, setup_logging
 from lsoph.monitor import Monitor
 from lsoph.ui.app import LsophApp
 
-# --- Type Definitions ---
-BackendFactory = Callable[[Monitor], Backend]
-BackendCoroutine = Coroutine[Any, Any, None]
-
-# --- Logging Setup ---
-# Logging setup is handled by log.py
-
-
-# --- Argument Parsing ---
-# Map backend names to their class constructors
-BACKEND_CONSTRUCTORS: dict[str, Callable[[Monitor], Backend]] = {
-    "strace": StraceBackend,
-    "lsof": LsofBackend,
-    "psutil": PsutilBackend,
-}
-# Keep lsof as default maybe? Or psutil? Let's stick with lsof for now.
-DEFAULT_BACKEND = "lsof"
-
 
 def parse_arguments(
+    available_backends: dict[str, Type[Backend]],  # Takes the dict as input
     argv: list[str] | None = None,
 ) -> argparse.Namespace:
     """Parses command-line arguments for lsoph."""
+    log = logging.getLogger("lsoph.cli.args")  # Use specific logger
+    backend_choices = sorted(list(available_backends.keys()))
+
+    if not backend_choices:
+        # Handle case where no backends are available (should also be caught in main)
+        print(
+            "Error: No monitoring backends are available on this system.",
+            file=sys.stderr,
+        )
+        print(
+            "Please ensure dependencies like 'lsof', 'strace', or 'psutil' are installed.",
+            file=sys.stderr,
+        )
+        sys.exit(1)  # Exit early if no backends
+
+    # Determine default backend, preferring strace if available
+    default_backend = (
+        "strace"
+        if "strace" in available_backends
+        else ("lsof" if "lsof" in available_backends else backend_choices[0])
+    )
+    log.debug(f"Default backend determined as: {default_backend}")
+
     parser = argparse.ArgumentParser(
         description="Monitors file access for a command or process using various backends.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=f"Available backends: {', '.join(BACKEND_CONSTRUCTORS.keys())}\n"
-        f"Default backend: {DEFAULT_BACKEND}\n\n"
+        epilog=f"Available backends: {', '.join(backend_choices)}\n"
+        f"Default backend: {default_backend}\n\n"
         "Examples:\n"
-        "  lsoph -p 1234 5678         # Attach to PIDs using default backend (lsof)\n"
-        "  lsoph -b strace -- sleep 10 # Run 'sleep 10' using strace backend\n"
-        "  lsoph -b psutil -c find .   # Run 'find .' using psutil backend",
+        "  lsoph -p 1234 5678       # Attach to PIDs using default backend\n"
+        "  lsoph -b strace sleep 10 # Run 'sleep 10' using strace backend\n"
+        "  lsoph -b psutil find .   # Run 'find .' using psutil backend",
     )
     parser.add_argument(
         "-b",
         "--backend",
-        default=DEFAULT_BACKEND,
-        choices=BACKEND_CONSTRUCTORS.keys(),
-        help=f"Monitoring backend to use (default: {DEFAULT_BACKEND})",
+        default=default_backend,
+        choices=backend_choices,  # Use dynamically discovered choices
+        help=f"Monitoring backend to use (default: {default_backend})",
     )
     parser.add_argument(
         "--log",
         default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL", "TRACE"],
         help="Set the logging level for the application (default: INFO)",
     )
     # Mutually exclusive group for attach (-p) or run (-c) mode
@@ -90,12 +90,6 @@ def parse_arguments(
     if args.command is not None and not args.command:
         parser.error("argument -c/--command: requires a command to run.")
 
-    # Warn if strace is used without root (it often needs it)
-    if args.backend == "strace" and os.geteuid() != 0:
-        print(
-            "Warning: 'strace' backend typically requires root privileges.",
-            file=sys.stderr,
-        )
     return args
 
 
@@ -108,19 +102,34 @@ def main(argv: list[str] | None = None) -> int:
     instantiates backend, creates the specific backend coroutine,
     and launches the Textual UI.
     """
+    # Setup logging first to capture discovery messages from backend init
+    temp_log_level = os.environ.get("LSOPH_LOG_LEVEL", "INFO").upper()
+    setup_logging(temp_log_level)
+    log = logging.getLogger("lsoph.cli")  # Get main cli logger
+
+    # Check if any backends were discovered during import
+    # Uses the BACKENDS dict imported from lsoph.backend
+    if not BACKENDS:
+        # The backend __init__ should have logged a warning.
+        print("Error: No monitoring backends available. Exiting.", file=sys.stderr)
+        return 1  # Indicate failure
+
     try:
-        args = parse_arguments(argv)
-        # Setup logging using the dedicated function
+        # Parse arguments using the discovered backends
+        args = parse_arguments(BACKENDS, argv)
+
+        # Re-setup logging with the level specified in args
         setup_logging(args.log)
-        log = logging.getLogger("lsoph.cli")  # Get logger after setup
         log.info("Starting lsoph...")
         log.debug(f"Parsed arguments: {args}")
 
-        # Get the constructor for the selected backend
-        backend_constructor = BACKEND_CONSTRUCTORS.get(args.backend)
-        if not backend_constructor:
+        # Get the constructor for the selected backend from the discovered dict
+        backend_class = BACKENDS.get(args.backend)
+        if not backend_class:
             # This should not happen due to argparse choices, but check anyway
-            log.critical(f"Invalid backend selected: {args.backend}")
+            log.critical(
+                f"Selected backend '{args.backend}' not found in available backends."
+            )
             return 1
 
         # Determine mode (attach/run) and prepare arguments
@@ -150,14 +159,14 @@ def main(argv: list[str] | None = None) -> int:
 
         # Instantiate the selected backend
         try:
-            backend_instance = backend_constructor(monitor)
+            backend_instance = backend_class(monitor)
             log.info(f"Instantiated backend: {args.backend}")
         except Exception as be_init_e:
             log.exception(f"Failed to initialize backend '{args.backend}': {be_init_e}")
             return 1
 
         # Create the specific coroutine to run (attach or run_command)
-        backend_coro: BackendCoroutine
+        backend_coro: Coroutine[Any, Any, None]
         if target_pids:
             backend_coro = backend_instance.attach(target_pids)
         elif target_command:
@@ -180,17 +189,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0  # Success
 
     except argparse.ArgumentError as e:
-        # Handle argparse errors gracefully
-        print(f"Argument Error: {e}", file=sys.stderr)
+        # Handle argparse errors gracefully (already printed by argparse)
+        log.error(f"Argument Error: {e}")
         return 2
     except Exception as e:
         # Catch any other unexpected errors during setup or run
+        log.critical(f"FATAL ERROR: {e}", exc_info=True)
+        # Also print to stderr in case logging failed
         print(f"FATAL ERROR: {e}", file=sys.stderr)
-        # Log exception if logging was successfully initialized
-        if logging.getLogger().hasHandlers():
-            logging.getLogger("lsoph.cli").exception(
-                "Unhandled exception during execution."
-            )
         return 1
 
 

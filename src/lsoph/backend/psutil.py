@@ -6,7 +6,14 @@ import subprocess
 import time
 from typing import Any
 
-import psutil
+# Attempt to import psutil and handle failure gracefully
+try:
+    import psutil
+
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    psutil = None  # Set to None if import fails
+    PSUTIL_AVAILABLE = False
 
 from lsoph.monitor import Monitor
 
@@ -19,8 +26,13 @@ DEFAULT_PSUTIL_POLL_INTERVAL = 0.5
 
 
 # --- Helper Functions (remain synchronous as psutil is sync) ---
+# These functions remain unchanged but are used by the renamed class below
+
+
 def _get_process_info(pid: int) -> psutil.Process | None:
     """Safely get a psutil.Process object."""
+    if not PSUTIL_AVAILABLE:
+        return None  # Guard clause
     try:
         return psutil.Process(pid)
     except (psutil.NoSuchProcess, psutil.AccessDenied, Exception) as e:
@@ -32,6 +44,8 @@ def _get_process_info(pid: int) -> psutil.Process | None:
 
 def _get_process_cwd(proc: psutil.Process) -> str | None:
     """Safely get the current working directory."""
+    if not PSUTIL_AVAILABLE:
+        return None  # Guard clause
     try:
         return proc.cwd()
     except (
@@ -46,9 +60,12 @@ def _get_process_cwd(proc: psutil.Process) -> str | None:
 
 def _get_process_open_files(
     proc: psutil.Process,
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]]:  # Use list and dict
     """Safely get open files and connections for a process."""
-    open_files_data: list[dict[str, Any]] = []
+    if not PSUTIL_AVAILABLE:
+        return []  # Guard clause
+
+    open_files_data: list[dict[str, Any]] = []  # Use list and dict
     pid = proc.pid
     try:  # Get regular files
         for f in proc.open_files():
@@ -79,7 +96,11 @@ def _get_process_open_files(
                 else:
                     laddr_str = "<?:?>"
                 if conn.raddr:
-                    raddr_str = f"{conn.raddr.ip}:{conn.raddr.port}"
+                    # Check if raddr has ip and port attributes
+                    if hasattr(conn.raddr, "ip") and hasattr(conn.raddr, "port"):
+                        raddr_str = f"{conn.raddr.ip}:{conn.raddr.port}"
+                    else:  # Handle cases like UNIX sockets where raddr might be a path string
+                        raddr_str = str(conn.raddr) if conn.raddr else ""
                 else:
                     raddr_str = ""
 
@@ -118,8 +139,10 @@ def _get_process_open_files(
 
 def _get_process_descendants(
     proc: psutil.Process,
-) -> list[int]:
+) -> list[int]:  # Use list
     """Safely get all descendant PIDs."""
+    if not PSUTIL_AVAILABLE:
+        return []  # Guard clause
     try:
         # Use list comprehension directly
         return [p.pid for p in proc.children(recursive=True)]
@@ -136,32 +159,49 @@ def _get_process_descendants(
 # --- Async Backend Class ---
 
 
-class PsutilBackend(Backend):
+class Psutil(Backend):  # Renamed from PsutilBackend
     """Async backend implementation using psutil polling."""
+
+    # Class attribute for the command-line name
+    backend_name = "psutil"
 
     def __init__(
         self, monitor: Monitor, poll_interval: float = DEFAULT_PSUTIL_POLL_INTERVAL
     ):
         super().__init__(monitor)
-        self.poll_interval = poll_interval
+        if not PSUTIL_AVAILABLE:
+            raise RuntimeError(
+                "psutil library is required for Psutil backend but not installed."
+            )
+        self.poll_interval = max(0.1, poll_interval)  # Ensure minimum interval
         # State is managed within the run methods
+
+    @staticmethod
+    def is_available() -> bool:
+        """Check if the psutil library is installed."""
+        log.debug(
+            f"Checking availability for {Psutil.backend_name}: {PSUTIL_AVAILABLE}"
+        )  # Use class name
+        return PSUTIL_AVAILABLE
 
     # --- Internal Helpers used by _poll_cycle ---
     def _update_cwd_cache(
         self,
         pid: int,
         proc: psutil.Process | None,
-        pid_cwd_cache: dict,
+        pid_cwd_cache: dict,  # Use dict
     ):
         """Updates the CWD cache if the PID is not already present."""
         if proc and pid not in pid_cwd_cache:
             cwd = _get_process_cwd(proc)
             pid_cwd_cache[pid] = cwd  # Store None if CWD retrieval failed
 
-    def _resolve_path(self, pid: int, path: str, pid_cwd_cache: dict) -> str:
+    def _resolve_path(
+        self, pid: int, path: str, pid_cwd_cache: dict
+    ) -> str:  # Use dict
         """Resolves a relative path using the cached CWD."""
         # Check for absolute paths (Unix/Windows) or special markers
-        if path.startswith(("/", "<")) or (len(path) > 1 and path[1] == ":"):
+        if path.startswith(("/", "<", "@")) or (len(path) > 1 and path[1] == ":"):
             return path
         cwd = pid_cwd_cache.get(pid)
         if cwd:
@@ -180,8 +220,8 @@ class PsutilBackend(Backend):
         pid: int,
         proc: psutil.Process,
         timestamp: float,
-        pid_cwd_cache: dict,
-        seen_fds: dict,
+        pid_cwd_cache: dict,  # Use dict
+        seen_fds: dict,  # Use dict
     ) -> set[int]:
         """Processes open files for a single PID, updating monitor state."""
         current_pid_fds: set[int] = set()
@@ -258,7 +298,7 @@ class PsutilBackend(Backend):
         pid: int,
         current_pid_fds: set[int],
         timestamp: float,
-        seen_fds: dict,
+        seen_fds: dict,  # Use dict
     ):
         """Detects and reports closed FDs by comparing current and previous state."""
         if pid not in seen_fds:
@@ -285,9 +325,9 @@ class PsutilBackend(Backend):
     def _poll_cycle(
         self,
         monitored_pids: set[int],
-        pid_exists_status: dict,
-        pid_cwd_cache: dict,
-        seen_fds: dict,
+        pid_exists_status: dict,  # Use dict
+        pid_cwd_cache: dict,  # Use dict
+        seen_fds: dict,  # Use dict
         track_descendants: bool,
     ) -> set[int]:
         """
@@ -376,7 +416,9 @@ class PsutilBackend(Backend):
 
         return monitored_pids  # Return the updated set
 
-    async def _run_loop(self, initial_pids: list[int], track_descendants: bool):
+    async def _run_loop(
+        self, initial_pids: list[int], track_descendants: bool
+    ):  # Use list
         """The core async monitoring loop, shared by attach and run_command."""
         log.info(
             f"Starting psutil monitoring loop. Initial PIDs: {initial_pids}, Track Descendants: {track_descendants}"
@@ -384,9 +426,11 @@ class PsutilBackend(Backend):
 
         # --- State Management within the loop ---
         monitored_pids: set[int] = set(initial_pids)
-        pid_exists_status: dict[int, bool] = {pid: True for pid in initial_pids}
-        pid_cwd_cache: dict[int, str | None] = {}
-        seen_fds: dict[int, dict[int, tuple[str, bool, bool]]] = {}
+        pid_exists_status: dict[int, bool] = {
+            pid: True for pid in initial_pids
+        }  # Use dict
+        pid_cwd_cache: dict[int, str | None] = {}  # Use dict
+        seen_fds: dict[int, dict[int, tuple[str, bool, bool]]] = {}  # Use dict
         # Initial CWD cache population
         for pid in initial_pids:
             proc = _get_process_info(pid)
@@ -423,22 +467,33 @@ class PsutilBackend(Backend):
                 if sleep_time > 0:
                     # Use asyncio.sleep for non-blocking wait
                     await asyncio.sleep(sleep_time)
+                elif (
+                    elapsed > self.poll_interval * 1.5
+                ):  # Log if significantly over interval
+                    log.warning(
+                        f"Psutil poll cycle took longer than interval ({elapsed:.2f}s > {self.poll_interval:.2f}s)"
+                    )
+                    await asyncio.sleep(0.01)  # Yield briefly
 
         except asyncio.CancelledError:
             log.info(
-                f"Psutil backend {('attach' if not track_descendants else 'run')} cancelled."
+                f"{self.__class__.__name__} backend {('attach' if not track_descendants else 'run')} cancelled."  # Use class name
             )
         except Exception as e:
-            log.exception(f"Unexpected error in psutil async loop: {e}")
+            log.exception(
+                f"Unexpected error in {self.__class__.__name__} async loop: {e}"
+            )  # Use class name
         finally:
             log.info(
-                f"Exiting psutil async {('attach' if not track_descendants else 'run')} loop."
+                f"Exiting {self.__class__.__name__} async {('attach' if not track_descendants else 'run')} loop."  # Use class name
             )
 
-    async def attach(self, pids: list[int]):
+    async def attach(self, pids: list[int]):  # Use list
         """Implementation of the attach method."""
         if not pids:
-            log.warning("PsutilBackend.attach called with no PIDs.")
+            log.warning(
+                f"{self.__class__.__name__}.attach called with no PIDs."
+            )  # Use class name
             return
         # Run the loop, now ALWAYS tracking descendants for attach mode too
         # This aligns behavior with strace/lsof where attach implies following children

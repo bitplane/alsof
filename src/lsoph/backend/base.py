@@ -5,6 +5,7 @@ import asyncio
 import logging
 import subprocess  # Keep for type hint if needed, use asyncio below
 from abc import ABC, abstractmethod
+from typing import Any, Coroutine  # Added Coroutine, Any
 
 from lsoph.monitor import Monitor
 
@@ -13,6 +14,10 @@ log = logging.getLogger("lsoph.backend.base")
 
 class Backend(ABC):
     """Abstract Base Class for all monitoring backends."""
+
+    # Class attribute intended to be overridden by subclasses
+    # This name is used as the key in the BACKENDS dictionary
+    backend_name: str = "base"  # Default, should be overridden
 
     def __init__(self, monitor: Monitor):
         """Initialize the backend."""
@@ -23,13 +28,24 @@ class Backend(ABC):
         )
         log.info(f"Initializing backend: {self.__class__.__name__}")
 
+    # __str__ method removed as it's not suitable for class-level key generation
+
+    @staticmethod
+    @abstractmethod
+    def is_available() -> bool:
+        """
+        Check if the backend's dependencies (e.g., executable) are met.
+        This MUST be implemented by subclasses.
+        """
+        raise NotImplementedError  # pragma: no cover
+
     @abstractmethod
     async def attach(self, pids: list[int]):
         """
         Asynchronously attach to and monitor existing process IDs.
         Should periodically check `self.should_stop`.
         """
-        pass
+        pass  # pragma: no cover
 
     async def run_command(self, command: list[str]):
         """
@@ -106,11 +122,12 @@ class Backend(ABC):
 
             # Cancel any remaining pending tasks
             for task in pending:
-                task.cancel()
-                try:
-                    await task  # Allow cancellation to propagate
-                except asyncio.CancelledError:
-                    pass  # Expected
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task  # Allow cancellation to propagate
+                    except asyncio.CancelledError:
+                        pass  # Expected
 
         except FileNotFoundError:
             log.exception(f"Command not found: {command[0]}")
@@ -126,6 +143,10 @@ class Backend(ABC):
             # Ensure attach task is cancelled if it started
             if attach_task and not attach_task.done():
                 attach_task.cancel()
+                try:
+                    await attach_task
+                except asyncio.CancelledError:
+                    pass  # Expected
         finally:
             log.info(f"Finished run_command for: {' '.join(command)}")
             self._process = None  # Clear process handle

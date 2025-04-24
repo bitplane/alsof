@@ -62,6 +62,9 @@ DEFAULT_SYSCALLS = sorted(
 
 
 # --- Event Processing Helper ---
+# _process_single_event remains unchanged
+
+
 async def _process_single_event(
     event: Syscall, monitor: Monitor, cwd_map: dict[int, str]
 ):
@@ -113,8 +116,11 @@ async def _process_single_event(
 
 
 # --- Backend Class ---
-class StraceBackend(Backend):
+class Strace(Backend):  # Renamed from StraceBackend
     """Async backend implementation using strace (refactored)."""
+
+    # Class attribute for the command-line name
+    backend_name = "strace"
 
     def __init__(self, monitor: Monitor, syscalls: list[str] = DEFAULT_SYSCALLS):
         super().__init__(monitor)
@@ -128,6 +134,15 @@ class StraceBackend(Backend):
             )
         )
         self._strace_process: asyncio.subprocess.Process | None = None
+
+    @staticmethod
+    def is_available() -> bool:
+        """Check if the strace executable is available in the system PATH."""
+        available = shutil.which("strace") is not None
+        log.debug(
+            f"Checking availability for {Strace.backend_name}: {available}"
+        )  # Use class name
+        return available
 
     # --- Stream Reading Helper ---
     async def _read_stderr_lines(
@@ -202,7 +217,9 @@ class StraceBackend(Backend):
     async def attach(self, pids: list[int]):
         """Implementation of the attach method."""
         if not pids:
-            log.warning("StraceBackend.attach called with no PIDs.")
+            log.warning(
+                f"{self.__class__.__name__}.attach called with no PIDs."
+            )  # Use class name
             return
 
         log.info(f"Attaching strace to PIDs/TIDs: {pids}")
@@ -290,7 +307,9 @@ class StraceBackend(Backend):
     async def run_command(self, command: list[str]):
         """Implementation of the run_command method."""
         if not command:
-            log.error("StraceBackend.run_command called empty.")
+            log.error(
+                f"{self.__class__.__name__}.run_command called empty."
+            )  # Use class name
             return
 
         log.info(
@@ -370,7 +389,9 @@ class StraceBackend(Backend):
     async def stop(self):
         """Signals the backend's running task to stop and terminates the managed strace process."""
         if not self._should_stop.is_set():
-            log.info(f"Signalling backend {self.__class__.__name__} to stop.")
+            log.info(
+                f"Signalling backend {self.__class__.__name__} to stop."
+            )  # Use class name
             self._should_stop.set()  # Set the event first
 
             # Get process handle and PID *before* calling terminate helper
@@ -386,7 +407,9 @@ class StraceBackend(Backend):
             # Clear the stored process handle after termination attempt
             self._strace_process = None
         else:
-            log.debug(f"Backend {self.__class__.__name__} stop already signalled.")
+            log.debug(
+                f"Backend {self.__class__.__name__} stop already signalled."
+            )  # Use class name
 
     # --- End Stop Method ---
 

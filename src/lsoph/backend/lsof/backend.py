@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+import shutil  # Import shutil for which()
 import time
 from typing import Any  # Keep Any if needed, though maybe not directly here
 
@@ -26,7 +27,7 @@ DEFAULT_CHILD_CHECK_INTERVAL_MULTIPLIER = 5
 
 
 # --- Async Backend Class ---
-class LsofBackend(Backend):
+class Lsof(Backend):  # Renamed from LsofBackend
     """
     Async backend implementation using periodic `lsof` command execution.
 
@@ -35,6 +36,9 @@ class LsofBackend(Backend):
     lsof output between poll cycles.
     """
 
+    # Class attribute for the command-line name
+    backend_name = "lsof"
+
     def __init__(
         self,
         monitor: Monitor,
@@ -42,7 +46,7 @@ class LsofBackend(Backend):
         child_check_multiplier: int = DEFAULT_CHILD_CHECK_INTERVAL_MULTIPLIER,
     ):
         """
-        Initializes the LsofBackend.
+        Initializes the Lsof backend.
 
         Args:
             monitor: The central Monitor instance.
@@ -55,10 +59,19 @@ class LsofBackend(Backend):
         )  # Ensure minimum reasonable interval
         self.child_check_multiplier = max(1, child_check_multiplier)  # Ensure >= 1
         log.info(
-            f"LsofBackend initialized. Poll Interval: {self.poll_interval}s, "
+            f"{self.__class__.__name__} initialized. Poll Interval: {self.poll_interval}s, "  # Use class name in log
             f"Child Check Multiplier: {self.child_check_multiplier}"
         )
         # Note: Internal state like seen_fds is managed within the attach/run loop
+
+    @staticmethod
+    def is_available() -> bool:
+        """Check if the lsof executable is available in the system PATH."""
+        available = shutil.which("lsof") is not None
+        log.debug(
+            f"Checking availability for {Lsof.backend_name}: {available}"
+        )  # Use class name
+        return available
 
     async def attach(self, pids: list[int]):
         """
@@ -72,18 +85,22 @@ class LsofBackend(Backend):
             pids: A list of initial process IDs to monitor.
         """
         if not pids:
-            log.warning("LsofBackend.attach called with no PIDs.")
+            log.warning(
+                f"{self.__class__.__name__}.attach called with no PIDs."
+            )  # Use class name
             return
 
         # Store original, valid PIDs (must be positive integers)
         initial_pids: set[int] = {p for p in pids if isinstance(p, int) and p > 0}
         if not initial_pids:
             log.warning(
-                "LsofBackend.attach called with no valid initial PIDs (must be > 0)."
-            )
+                f"{self.__class__.__name__}.attach called with no valid initial PIDs (must be > 0)."
+            )  # Use class name
             return
 
-        log.info(f"Starting lsof attach monitoring loop. Initial PIDs: {initial_pids}")
+        log.info(
+            f"Starting {self.__class__.__name__} attach monitoring loop. Initial PIDs: {initial_pids}"  # Use class name
+        )
 
         # --- State for the attach loop ---
         # Set of all PIDs currently being monitored (initial + discovered descendants)
@@ -99,7 +116,7 @@ class LsofBackend(Backend):
             while not self.should_stop:
                 start_time = time.monotonic()
                 poll_count += 1
-                log.trace(f"Lsof attach loop cycle: {poll_count}, Monitoring PIDs: {monitored_pids}")  # type: ignore
+                log.trace(f"{self.__class__.__name__} attach loop cycle: {poll_count}, Monitoring PIDs: {monitored_pids}")  # type: ignore
 
                 # --- Periodically check for new descendants ---
                 # Check descendants only based on the *original* set of PIDs provided
@@ -189,16 +206,22 @@ class LsofBackend(Backend):
                     )  # Yield control briefly to prevent starving event loop
 
         except asyncio.CancelledError:
-            log.info("Lsof backend attach task cancelled.")
+            log.info(
+                f"{self.__class__.__name__} backend attach task cancelled."
+            )  # Use class name
         except Exception as e:
             # Catch unexpected errors in the main loop
-            log.exception(f"Unexpected error in lsof async attach loop: {e}")
+            log.exception(
+                f"Unexpected error in {self.__class__.__name__} async attach loop: {e}"
+            )  # Use class name
         finally:
-            log.info("Exiting lsof async attach loop.")
+            log.info(
+                f"Exiting {self.__class__.__name__} async attach loop."
+            )  # Use class name
             # Optional: Perform any final cleanup if needed, though usually handled by app exit
             # e.g., closing any remaining FDs in the monitor state if desired.
 
     # run_command is inherited from the base Backend class.
     # The base implementation starts the command and then calls self.attach([pid]).
     # Since our attach now handles descendants, run_command will effectively
-    # monitor the initial command and all its descendants using this LsofBackend.
+    # monitor the initial command and all its descendants using this Lsof backend.
