@@ -6,7 +6,8 @@ import subprocess
 import time
 
 # Use Python 3.10+ style hints
-from typing import Any, Dict, List, Optional, Set, Tuple
+# Removed: from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any  # Keep Any for now
 
 import psutil
 
@@ -25,17 +26,18 @@ DEFAULT_PSUTIL_POLL_INTERVAL = 0.5
 # --- Helper Functions (remain synchronous as psutil is sync) ---
 # _get_process_info, _get_process_cwd, _get_process_open_files, _get_process_descendants
 # remain the same.
-def _get_process_info(pid: int) -> Optional[psutil.Process]:
+def _get_process_info(pid: int) -> psutil.Process | None:  # Use | for Optional
     """Safely get a psutil.Process object."""
     try:
         return psutil.Process(pid)
     except (psutil.NoSuchProcess, psutil.AccessDenied, Exception) as e:
+        # Log non-NoSuchProcess errors at debug level
         if not isinstance(e, psutil.NoSuchProcess):
             log.debug(f"Error getting psutil.Process for PID {pid}: {type(e).__name__}")
         return None
 
 
-def _get_process_cwd(proc: psutil.Process) -> Optional[str]:
+def _get_process_cwd(proc: psutil.Process) -> str | None:  # Use | for Optional
     """Safely get the current working directory."""
     try:
         return proc.cwd()
@@ -49,18 +51,21 @@ def _get_process_cwd(proc: psutil.Process) -> Optional[str]:
         return None
 
 
-def _get_process_open_files(proc: psutil.Process) -> List[Dict[str, Any]]:
+def _get_process_open_files(
+    proc: psutil.Process,
+) -> list[dict[str, Any]]:  # Use list, dict
     """Safely get open files and connections for a process."""
-    open_files_data = []
+    open_files_data: list[dict[str, Any]] = []  # Use list, dict
     pid = proc.pid
     try:  # Get regular files
         for f in proc.open_files():
+            # Ensure path is a string, handle potential issues
             path = str(f.path) if hasattr(f, "path") and f.path else f"<FD:{f.fd}>"
             open_files_data.append(
                 {
                     "path": path,
                     "fd": f.fd,
-                    "mode": getattr(f, "mode", ""),
+                    "mode": getattr(f, "mode", ""),  # Use getattr for safety
                     "type": "file",
                 }
             )
@@ -71,24 +76,36 @@ def _get_process_open_files(proc: psutil.Process) -> List[Dict[str, Any]]:
         Exception,
     ) as e:
         log.debug(f"Error accessing open files for PID {pid}: {type(e).__name__}")
+
     try:  # Get connections
         for conn in proc.connections(kind="all"):
             try:
-                if conn.status == psutil.CONN_ESTABLISHED and conn.raddr:
-                    path = f"<SOCKET:{conn.type.name}:{conn.laddr.ip}:{conn.laddr.port}->{conn.raddr.ip}:{conn.raddr.port}>"
-                elif conn.status == psutil.CONN_LISTEN:
-                    path = f"<SOCKET_LISTEN:{conn.type.name}:{conn.laddr.ip}:{conn.laddr.port}>"
-                elif conn.laddr:
-                    path = f"<SOCKET:{conn.type.name}:{conn.laddr.ip}:{conn.laddr.port} status={conn.status}>"
+                # Simplify connection string representation
+                if conn.laddr:
+                    laddr_str = f"{conn.laddr.ip}:{conn.laddr.port}"
                 else:
-                    path = (
-                        f"<SOCKET:{conn.type.name} fd={conn.fd} status={conn.status}>"
-                    )
+                    laddr_str = "<?:?>"
+                if conn.raddr:
+                    raddr_str = f"{conn.raddr.ip}:{conn.raddr.port}"
+                else:
+                    raddr_str = ""
+
+                conn_type_str = (
+                    conn.type.name if hasattr(conn.type, "name") else str(conn.type)
+                )
+
+                if conn.status == psutil.CONN_ESTABLISHED and raddr_str:
+                    path = f"<SOCKET:{conn_type_str}:{laddr_str}->{raddr_str}>"
+                elif conn.status == psutil.CONN_LISTEN:
+                    path = f"<SOCKET_LISTEN:{conn_type_str}:{laddr_str}>"
+                else:
+                    path = f"<SOCKET:{conn_type_str}:{laddr_str} fd={conn.fd} status={conn.status}>"
+
                 open_files_data.append(
                     {
                         "path": path,
-                        "fd": conn.fd if conn.fd != -1 else -1,
-                        "mode": "rw",
+                        "fd": conn.fd if conn.fd != -1 else -1,  # Use -1 for invalid FD
+                        "mode": "rw",  # Assume read/write for sockets
                         "type": "socket",
                     }
                 )
@@ -106,9 +123,12 @@ def _get_process_open_files(proc: psutil.Process) -> List[Dict[str, Any]]:
     return open_files_data
 
 
-def _get_process_descendants(proc: psutil.Process) -> List[int]:
+def _get_process_descendants(
+    proc: psutil.Process,
+) -> list[int]:  # Use list instead of List
     """Safely get all descendant PIDs."""
     try:
+        # Use list comprehension directly
         return [p.pid for p in proc.children(recursive=True)]
     except (
         psutil.NoSuchProcess,
@@ -135,23 +155,33 @@ class PsutilBackend(Backend):
 
     # --- Internal Helpers used by _poll_cycle ---
     def _update_cwd_cache(
-        self, pid: int, proc: Optional[psutil.Process], pid_cwd_cache: dict
+        self,
+        pid: int,
+        proc: psutil.Process | None,
+        pid_cwd_cache: dict,  # Use | for Optional, dict
     ):
+        """Updates the CWD cache if the PID is not already present."""
         if proc and pid not in pid_cwd_cache:
             cwd = _get_process_cwd(proc)
-            pid_cwd_cache[pid] = cwd
+            pid_cwd_cache[pid] = cwd  # Store None if CWD retrieval failed
 
-    def _resolve_path(self, pid: int, path: str, pid_cwd_cache: dict) -> str:
+    def _resolve_path(
+        self, pid: int, path: str, pid_cwd_cache: dict
+    ) -> str:  # Use dict
+        """Resolves a relative path using the cached CWD."""
+        # Check for absolute paths (Unix/Windows) or special markers
         if path.startswith(("/", "<")) or (len(path) > 1 and path[1] == ":"):
             return path
         cwd = pid_cwd_cache.get(pid)
         if cwd:
             try:
+                # Use os.path.normpath for better path normalization
                 return os.path.normpath(os.path.join(cwd, path))
-            except ValueError as e:
+            except ValueError as e:  # Catch errors during join/normpath
                 log.warning(
                     f"Error joining path '{path}' with CWD '{cwd}' for PID {pid}: {e}"
                 )
+        # Return original path if CWD is unknown or join fails
         return path
 
     def _process_pid_files(
@@ -159,30 +189,35 @@ class PsutilBackend(Backend):
         pid: int,
         proc: psutil.Process,
         timestamp: float,
-        pid_cwd_cache: dict,
-        seen_fds: dict,
-    ) -> Set[int]:
-        current_pid_fds: Set[int] = set()
+        pid_cwd_cache: dict,  # Use dict
+        seen_fds: dict,  # Use dict
+    ) -> set[int]:  # Use set instead of Set
+        """Processes open files for a single PID, updating monitor state."""
+        current_pid_fds: set[int] = set()  # Use set instead of Set
         open_files_data = _get_process_open_files(proc)
+
         for file_info in open_files_data:
             path, fd, mode = (
                 file_info["path"],
                 file_info["fd"],
                 file_info.get("mode", ""),
             )
+            # Skip invalid FDs (like -1 for sockets)
             if fd < 0:
                 continue
+
             current_pid_fds.add(fd)
             resolved_path = self._resolve_path(pid, path, pid_cwd_cache)
+
+            # Determine read/write capability based on mode
             can_read = "r" in mode or "+" in mode
             can_write = "w" in mode or "a" in mode or "+" in mode
-            is_new, has_changed, previous_state = (
-                True,
-                False,
-                seen_fds.get(pid, {}).get(fd),
-            )
-            if previous_state:
-                is_new = False
+
+            # Check against previous state stored in seen_fds
+            previous_state = seen_fds.get(pid, {}).get(fd)
+            is_new = previous_state is None
+            has_changed = False
+            if not is_new:
                 old_path, old_read, old_write = previous_state
                 has_changed = (
                     old_path != resolved_path
@@ -190,14 +225,21 @@ class PsutilBackend(Backend):
                     or old_write != can_write
                 )
 
+            # If new or changed, update monitor and seen_fds state
             if is_new or has_changed:
+                # If changed, simulate close of old state first
                 if has_changed:
                     old_path, _, _ = previous_state
                     self.monitor.close(pid, fd, True, timestamp, source="psutil_change")
+
+                # Report open event
                 self.monitor.open(
                     pid, resolved_path, fd, True, timestamp, source="psutil", mode=mode
                 )
+                # Update seen_fds cache
                 seen_fds.setdefault(pid, {})[fd] = (resolved_path, can_read, can_write)
+
+                # Report read/write based on mode (as psutil doesn't track operations)
                 if can_read:
                     self.monitor.read(
                         pid,
@@ -221,40 +263,56 @@ class PsutilBackend(Backend):
         return current_pid_fds
 
     def _detect_and_handle_closures(
-        self, pid: int, current_pid_fds: Set[int], timestamp: float, seen_fds: dict
+        self,
+        pid: int,
+        current_pid_fds: set[int],
+        timestamp: float,
+        seen_fds: dict,  # Use set, dict
     ):
+        """Detects and reports closed FDs by comparing current and previous state."""
         if pid not in seen_fds:
-            return
+            return  # No previous state for this PID
+
         closed_count = 0
+        # Iterate over a copy of keys as we might delete from the dict
         previous_pid_fds = list(seen_fds[pid].keys())
+
         for fd in previous_pid_fds:
             if fd not in current_pid_fds:
-                path, _, _ = seen_fds[pid][fd]
+                # FD was present before, but not now -> closed
+                path, _, _ = seen_fds[pid][fd]  # Get path from cached state
                 self.monitor.close(pid, fd, True, timestamp, source="psutil_poll")
+                # Remove the closed FD from the cache
                 del seen_fds[pid][fd]
                 closed_count += 1
+
+        # Clean up PID entry if it becomes empty
         if pid in seen_fds and not seen_fds[pid]:
             del seen_fds[pid]
+        # if closed_count > 0: log.debug(f"Detected {closed_count} closures for PID {pid}")
 
     def _poll_cycle(
         self,
-        monitored_pids: set[int],
-        pid_exists_status: dict,
-        pid_cwd_cache: dict,
-        seen_fds: dict,
+        monitored_pids: set[int],  # Use set
+        pid_exists_status: dict,  # Use dict
+        pid_cwd_cache: dict,  # Use dict
+        seen_fds: dict,  # Use dict
         track_descendants: bool,
-    ):  # Removed initial_pids_for_desc_check (not needed)
+    ) -> set[int]:  # Return set
         """
         Performs a single polling cycle.
         Accepts state dictionaries as arguments and returns updated monitored_pids.
         """
         timestamp = time.time()
-        pids_in_this_poll = set(monitored_pids)  # Copy
+        pids_in_this_poll = set(monitored_pids)  # Copy to iterate safely
 
-        # Discover New Descendants
+        # --- Discover New Descendants (if tracking) ---
         if track_descendants:
             newly_found_pids = set()
-            pids_to_check_children = list(monitored_pids)
+            # Check children of currently monitored *and existing* PIDs
+            pids_to_check_children = [
+                p for p in monitored_pids if pid_exists_status.get(p, True)
+            ]
             for pid in pids_to_check_children:
                 proc = _get_process_info(pid)
                 if proc:
@@ -265,9 +323,11 @@ class PsutilBackend(Backend):
                                 f"Found new child process: {child_pid} (parent: {pid})"
                             )
                             newly_found_pids.add(child_pid)
+                            # Mark as existing and cache CWD immediately
                             pid_exists_status[child_pid] = True
                             child_proc = _get_process_info(child_pid)
                             self._update_cwd_cache(child_pid, child_proc, pid_cwd_cache)
+            # Add newly found PIDs to the main sets
             if newly_found_pids:
                 log.info(
                     f"Adding {len(newly_found_pids)} new child PIDs to monitoring."
@@ -275,12 +335,15 @@ class PsutilBackend(Backend):
                 monitored_pids.update(newly_found_pids)
                 pids_in_this_poll.update(newly_found_pids)
 
-        # Process Each Monitored PID
+        # --- Process Each Monitored PID ---
         for pid in pids_in_this_poll:
+            # Skip if already marked as non-existent in this cycle
             if pid_exists_status.get(pid) is False:
                 continue
+
             proc = _get_process_info(pid)
             if proc:
+                # Process exists, update status and process files
                 pid_exists_status[pid] = True
                 self._update_cwd_cache(pid, proc, pid_cwd_cache)
                 current_pid_fds = self._process_pid_files(
@@ -289,43 +352,55 @@ class PsutilBackend(Backend):
                 self._detect_and_handle_closures(
                     pid, current_pid_fds, timestamp, seen_fds
                 )
-            else:  # Process doesn't exist or access denied
-                if pid_exists_status.get(pid) is True:
+            else:
+                # Process doesn't exist or access denied
+                if (
+                    pid_exists_status.get(pid) is True
+                ):  # Log only if it was previously seen
                     log.info(
                         f"Monitored process PID {pid} is no longer accessible or has exited."
                     )
                 pid_exists_status[pid] = False
-                if pid in seen_fds:  # Close FDs if process is gone
+                # If process is gone, ensure all its cached FDs are marked as closed
+                if pid in seen_fds:
                     self._detect_and_handle_closures(pid, set(), timestamp, seen_fds)
 
-        # Cleanup Stale PID entries
+        # --- Cleanup Stale PID entries ---
         pids_to_remove = {
             pid
             for pid, exists in pid_exists_status.items()
-            if not exists and pid in monitored_pids
+            if not exists
+            and pid in monitored_pids  # Only remove if it was being monitored
         }
         if pids_to_remove:
             log.debug(
                 f"Removing {len(pids_to_remove)} non-existent PIDs from monitoring set: {pids_to_remove}"
             )
             monitored_pids.difference_update(pids_to_remove)
-            for pid in pids_to_remove:  # Clean up associated state
+            # Clean up associated state caches
+            for pid in pids_to_remove:
                 pid_cwd_cache.pop(pid, None)
                 seen_fds.pop(pid, None)
+                # pid_exists_status.pop(pid, None) # Keep False status for future checks
 
         return monitored_pids  # Return the updated set
 
-    async def _run_loop(self, initial_pids: list[int], track_descendants: bool):
+    async def _run_loop(
+        self, initial_pids: list[int], track_descendants: bool
+    ):  # Use list
         """The core async monitoring loop, shared by attach and run_command."""
         log.info(
             f"Starting psutil monitoring loop. Initial PIDs: {initial_pids}, Track Descendants: {track_descendants}"
         )
 
         # --- State Management within the loop ---
-        monitored_pids: Set[int] = set(initial_pids)
-        pid_exists_status: Dict[int, bool] = {pid: True for pid in initial_pids}
-        pid_cwd_cache: Dict[int, Optional[str]] = {}
-        seen_fds: Dict[int, Dict[int, Tuple[str, bool, bool]]] = {}
+        monitored_pids: set[int] = set(initial_pids)  # Use set
+        pid_exists_status: dict[int, bool] = {
+            pid: True for pid in initial_pids
+        }  # Use dict
+        pid_cwd_cache: dict[int, str | None] = {}  # Use dict, | for Optional
+        seen_fds: dict[int, dict[int, tuple[str, bool, bool]]] = {}  # Use dict, tuple
+        # Initial CWD cache population
         for pid in initial_pids:
             proc = _get_process_info(pid)
             self._update_cwd_cache(pid, proc, pid_cwd_cache)
@@ -336,6 +411,7 @@ class PsutilBackend(Backend):
                 start_time = time.monotonic()
 
                 # Perform the synchronous polling logic, passing state
+                # This function now modifies the state dicts/sets directly
                 updated_monitored_pids = self._poll_cycle(
                     monitored_pids,
                     pid_exists_status,
@@ -358,6 +434,7 @@ class PsutilBackend(Backend):
                 elapsed = time.monotonic() - start_time
                 sleep_time = max(0, self.poll_interval - elapsed)
                 if sleep_time > 0:
+                    # Use asyncio.sleep for non-blocking wait
                     await asyncio.sleep(sleep_time)
 
         except asyncio.CancelledError:
@@ -371,12 +448,13 @@ class PsutilBackend(Backend):
                 f"Exiting psutil async {('attach' if not track_descendants else 'run')} loop."
             )
 
-    async def attach(self, pids: list[int]):
+    async def attach(self, pids: list[int]):  # Use list
         """Implementation of the attach method."""
         if not pids:
             log.warning("PsutilBackend.attach called with no PIDs.")
             return
         # Run the loop, now ALWAYS tracking descendants for attach mode too
+        # This aligns behavior with strace/lsof where attach implies following children
         await self._run_loop(initial_pids=pids, track_descendants=True)
 
     # run_command is inherited from the base class

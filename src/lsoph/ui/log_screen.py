@@ -8,11 +8,13 @@ from collections import deque
 from textual.app import ComposeResult
 from textual.binding import Binding
 
+# Use Python 3.10+ style hints
 # Removed Container import
-from textual.containers import (  # Keep VerticalScroll if needed for the log widget itself
-    VerticalScroll,
+from textual.containers import (
+    VerticalScroll,  # Keep VerticalScroll if needed for the log widget itself; This seems unused, consider removing if not needed
 )
 from textual.screen import Screen  # Changed from ModalScreen to Screen
+from textual.timer import Timer  # Import Timer type for _timer attribute
 from textual.widgets import Footer, Header, RichLog, Static  # Added Header, Footer
 
 log = logging.getLogger("lsoph.ui.log")
@@ -33,12 +35,11 @@ class LogScreen(Screen):  # Changed base class to Screen
         Binding("end", "scroll_end()", "Scroll End", show=False),
     ]
 
-    # Remove DEFAULT_CSS related to modal container sizing
-    # DEFAULT_CSS = """..."""
+    # No CSS needed here if it's defined in app.css or using default layout
 
-    def __init__(self, log_queue: deque):
+    def __init__(self, log_queue: deque):  # Use deque directly
         self.log_queue = log_queue
-        self._timer = None
+        self._timer: Timer | None = None  # Use | for Optional, Timer type
         super().__init__()
 
     def compose(self) -> ComposeResult:
@@ -47,21 +48,22 @@ class LogScreen(Screen):  # Changed base class to Screen
         # Directly yield the RichLog, making it fill the screen body
         yield RichLog(
             id="app-log",
-            max_lines=2000,
-            auto_scroll=True,
-            wrap=False,
-            highlight=True,
-            markup=True,
+            max_lines=2000,  # Limit stored lines for performance
+            auto_scroll=True,  # Keep scrolled to bottom by default
+            wrap=False,  # Disable wrapping for log lines
+            highlight=True,  # Enable syntax highlighting
+            markup=True,  # Enable Rich markup
         )
         yield Footer()
 
     def on_mount(self) -> None:
         """Called when the screen is mounted. Populates with existing logs and starts timer."""
-        log_widget = self.query_one(RichLog)
-        log.debug(
-            f"LogScreen mounted. Processing {len(self.log_queue)} existing log messages."
-        )
         try:
+            log_widget = self.query_one(RichLog)
+            log.debug(
+                f"LogScreen mounted. Processing {len(self.log_queue)} existing log messages."
+            )
+
             # Write existing logs from the queue
             existing_logs = list(self.log_queue)  # Copy queue items
             if existing_logs:
@@ -70,6 +72,7 @@ class LogScreen(Screen):  # Changed base class to Screen
                 log_widget.scroll_end(
                     animate=False
                 )  # Scroll to bottom after initial load
+
             # Start timer to check for new logs periodically
             self._timer = self.set_interval(
                 1 / 10, self._check_log_queue
@@ -77,9 +80,10 @@ class LogScreen(Screen):  # Changed base class to Screen
         except Exception as e:
             log.exception(f"Error during LogScreen mount: {e}")
             try:
+                # Try writing error to the log widget itself
                 log_widget.write(f"[bold red]Error mounting log screen: {e}[/]")
             except Exception:
-                pass
+                pass  # Ignore errors during error reporting
 
     def on_unmount(self) -> None:
         """Called when the screen is unmounted. Stops the timer."""
@@ -89,24 +93,32 @@ class LogScreen(Screen):  # Changed base class to Screen
                 log.debug("LogScreen unmounted. Stopped log queue timer.")
             except Exception as e:
                 log.error(f"Error stopping log screen timer: {e}")
-        self._timer = None
+        self._timer = None  # Clear the timer reference
 
     def _check_log_queue(self) -> None:
         """Periodically check the log queue and write new lines to RichLog."""
         try:
             log_widget = self.query_one(RichLog)
             lines_to_write = []
+            # Efficiently drain the queue
             while True:
                 try:
                     record = self.log_queue.popleft()
                     lines_to_write.append(record)
                 except IndexError:
                     break  # Queue is empty
+
+            # Write collected lines in one go if any exist
             if lines_to_write:
                 for line in lines_to_write:
                     log_widget.write(line)
+                # Optionally scroll to end only if new lines were added and auto_scroll is desired
+                # log_widget.scroll_end(animate=False)
         except Exception as e:
+            # Log error to stderr as the log screen itself might be broken
             print(f"ERROR: Error processing log queue: {e}", file=sys.stderr)
+            # Optionally stop the timer to prevent repeated errors
+            # if self._timer: self._timer.stop()
 
     def action_clear_log(self) -> None:
         """Action to clear the log display."""
@@ -122,19 +134,37 @@ class LogScreen(Screen):  # Changed base class to Screen
     # --- Scrolling Actions ---
     # RichLog handles scrolling internally, but bindings can target its methods
     def action_scroll_up(self) -> None:
-        self.query_one(RichLog).scroll_up(animate=False)
+        try:
+            self.query_one(RichLog).scroll_up(animate=False)
+        except Exception:
+            pass  # Ignore errors if widget not found
 
     def action_scroll_down(self) -> None:
-        self.query_one(RichLog).scroll_down(animate=False)
+        try:
+            self.query_one(RichLog).scroll_down(animate=False)
+        except Exception:
+            pass
 
     def action_page_up(self) -> None:
-        self.query_one(RichLog).scroll_page_up(animate=False)
+        try:
+            self.query_one(RichLog).scroll_page_up(animate=False)
+        except Exception:
+            pass
 
     def action_page_down(self) -> None:
-        self.query_one(RichLog).scroll_page_down(animate=False)
+        try:
+            self.query_one(RichLog).scroll_page_down(animate=False)
+        except Exception:
+            pass
 
     def action_scroll_home(self) -> None:
-        self.query_one(RichLog).scroll_home(animate=False)
+        try:
+            self.query_one(RichLog).scroll_home(animate=False)
+        except Exception:
+            pass
 
     def action_scroll_end(self) -> None:
-        self.query_one(RichLog).scroll_end(animate=False)
+        try:
+            self.query_one(RichLog).scroll_end(animate=False)
+        except Exception:
+            pass

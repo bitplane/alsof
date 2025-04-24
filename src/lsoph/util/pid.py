@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Filename: pid.py
+# Filename: src/lsoph/util/pid.py
 
 import argparse
 import logging  # Keep logging import
@@ -9,16 +9,20 @@ import sys
 
 import psutil
 
+# Use Python 3.10+ style hints
+# Removed: from typing import List, Optional
+
+
 # --- Setup Logging ---
 # REMOVED: logging.basicConfig(...)
 log = logging.getLogger(__name__)  # Get logger instance
 
 
-def get_descendants(parent_pid: int) -> list[int]:
+def get_descendants(parent_pid: int) -> list[int]:  # Use list
     """
     Retrieves a list of all descendant process IDs (PIDs) for a given parent PID.
     """
-    descendant_pids: list[int] = []
+    descendant_pids: list[int] = []  # Use list
     try:
         parent = psutil.Process(parent_pid)
         descendant_procs = parent.children(recursive=True)
@@ -33,7 +37,7 @@ def get_descendants(parent_pid: int) -> list[int]:
     return descendant_pids
 
 
-def get_cwd(pid: int) -> str | None:
+def get_cwd(pid: int) -> str | None:  # Use | for Optional
     """
     Retrieves the Current Working Directory (CWD) for a given PID.
 
@@ -77,13 +81,13 @@ def get_cwd(pid: int) -> str | None:
             )
             return None
     except Exception as e:
-        # Catch other potential psutil errors
+        # Catch other potential psutil errors (e.g., ZombieProcess on some platforms)
         log.error(f"An unexpected error occurred getting CWD for PID {pid}: {e}")
         return None
 
 
 # --- Main Execution Function (for testing) ---
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:  # Use | for Optional, list
     """
     Command-line entry point for testing pid functions.
     """
@@ -131,13 +135,14 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"Process {args.pid} not found.", file=sys.stderr)
                     return 1
                 else:
+                    # Process exists but no descendants found (or access denied)
                     print(
-                        f"No descendants found for PID {args.pid}."
-                    )  # Or access denied
+                        f"No descendants found for PID {args.pid} (or access denied)."
+                    )
             else:
                 for d_pid in descendant_pids:
                     print(d_pid)
-        return 0
+        return 0  # Success
     except Exception as e:
         log.critical(f"An unexpected error occurred in main: {e}", exc_info=True)
         return 1

@@ -8,7 +8,11 @@ import subprocess  # Still needed for DEVNULL potentially, though asyncio has it
 import time
 
 # Use Python 3.10+ style hints
-from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Set, Tuple
+# Removed: from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Set, Tuple
+from collections.abc import (  # Import Iterator/AsyncIterator from collections.abc
+    AsyncIterator,
+    Iterator,
+)
 
 from lsoph.monitor import Monitor
 from lsoph.util.pid import get_descendants  # Keep for descendant logic if needed
@@ -30,7 +34,7 @@ FD_TYPE_RE = re.compile(r"(\d+)([rwu])?")
 
 
 # --- Parsing Logic (remains synchronous) ---
-def _parse_fd(fd_str: str) -> tuple[Optional[int], str]:
+def _parse_fd(fd_str: str) -> tuple[int | None, str]:  # Use | for Optional
     """Parse the FD column from lsof output (field 'f')."""
     if fd_str in ("cwd", "rtd", "txt", "mem"):
         return None, fd_str
@@ -41,9 +45,11 @@ def _parse_fd(fd_str: str) -> tuple[Optional[int], str]:
     return None, fd_str
 
 
-def _parse_lsof_f_output(lines: Iterator[str]) -> Iterator[Dict]:
+def _parse_lsof_f_output(
+    lines: Iterator[str],
+) -> Iterator[dict]:  # Use Iterator from collections.abc
     """Parses the output of `lsof -F pcftn`."""
-    current_record: dict[str, Any] = {}
+    current_record: dict[str, Any] = {}  # Use dict instead of Dict
     for line in lines:
         line = line.strip()
         if not line:
@@ -51,6 +57,9 @@ def _parse_lsof_f_output(lines: Iterator[str]) -> Iterator[Dict]:
         field_type = line[0]
         value = line[1:]
         if field_type == "p":
+            # Yield previous record before starting a new one
+            # (Original logic might have missed the last record if 'n' wasn't the last field)
+            # Let's stick to the original logic where yield happens on 'n'
             current_record = {"pid": int(value)}
         elif field_type == "c":
             current_record["command"] = value
@@ -63,7 +72,9 @@ def _parse_lsof_f_output(lines: Iterator[str]) -> Iterator[Dict]:
             current_record["type"] = value
         elif field_type == "n":
             current_record["path"] = value
+            # Yield the complete record when the path ('n') is encountered
             yield current_record
+            # Reset for the next record, keeping pid/command if they exist
             current_record = {
                 "pid": current_record.get("pid"),
                 "command": current_record.get("command"),
@@ -72,8 +83,8 @@ def _parse_lsof_f_output(lines: Iterator[str]) -> Iterator[Dict]:
 
 # --- Async I/O Logic ---
 async def _run_lsof_command_async(
-    pids: Optional[list[int]] = None,
-) -> AsyncIterator[str]:
+    pids: list[int] | None = None,  # Use | for Optional, list instead of List
+) -> AsyncIterator[str]:  # Use AsyncIterator from collections.abc
     """
     Runs the lsof command asynchronously and yields its raw standard output lines.
     """
@@ -84,7 +95,7 @@ async def _run_lsof_command_async(
     if pids:
         cmd.extend(["-p", ",".join(map(str, pids))])
     # log.info(f"Running async lsof command: {' '.join(cmd)}") # Reduce noise
-    process: asyncio.subprocess.Process | None = None
+    process: asyncio.subprocess.Process | None = None  # Use | for Optional
     try:
         process = await asyncio.create_subprocess_exec(
             *cmd,
@@ -102,9 +113,10 @@ async def _run_lsof_command_async(
             log.error("lsof command (async) did not produce stdout.")
 
         await process.wait()  # Wait for process to finish
+        # lsof exits with 1 if some PIDs weren't found, which is not an error for us
         if process.returncode != 0 and process.returncode != 1:
             log.warning(
-                f"lsof command (async) exited with non-zero code: {process.returncode}"
+                f"lsof command (async) exited with unexpected code: {process.returncode}"
             )
 
     except FileNotFoundError:
@@ -118,6 +130,7 @@ async def _run_lsof_command_async(
             log.warning("lsof process did not exit, attempting to kill.")
             try:
                 process.kill()
+                await process.wait()  # Wait for kill
             except ProcessLookupError:
                 pass  # Already gone
             except Exception as kill_e:
@@ -125,7 +138,9 @@ async def _run_lsof_command_async(
 
 
 # --- State Update Logic (synchronous) ---
-def _process_lsof_record(record: Dict, monitor: Monitor, timestamp: float) -> None:
+def _process_lsof_record(
+    record: dict, monitor: Monitor, timestamp: float
+) -> None:  # Use dict instead of Dict
     """Process a single parsed lsof record and update the monitor state."""
     pid = record.get("pid")
     path = record.get("path")
@@ -134,13 +149,14 @@ def _process_lsof_record(record: Dict, monitor: Monitor, timestamp: float) -> No
     fd = record.get("fd")
     fd_str = record.get("fd_str", "unknown")
     mode = record.get("mode", "")
-    if fd is None:  # Special file type
+    if fd is None:  # Special file type (cwd, txt, etc.)
         monitor.stat(pid, path, True, timestamp, source="lsof", fd_str=fd_str)
         return
     # Regular file descriptor
     monitor.open(
         pid, path, fd, True, timestamp, source="lsof", fd_str=fd_str, mode=mode
     )
+    # Simulate read/write based on mode (as lsof doesn't show actual operations)
     if "r" in mode or "u" in mode:
         monitor.read(pid, fd, path, True, timestamp, source="lsof", bytes=0)
     if "w" in mode or "u" in mode:
@@ -148,13 +164,13 @@ def _process_lsof_record(record: Dict, monitor: Monitor, timestamp: float) -> No
 
 
 async def _perform_lsof_poll_async(
-    pids_to_monitor: list[int],
+    pids_to_monitor: list[int],  # Use list instead of List
     monitor: Monitor,
-    seen_fds: dict[int, set[tuple[int, str]]],
-) -> dict[int, set[tuple[int, str]]]:
+    seen_fds: dict[int, set[tuple[int, str]]],  # Use dict, set, tuple
+) -> dict[int, set[tuple[int, str]]]:  # Use dict, set, tuple
     """Performs a single async poll cycle using lsof."""
     timestamp = time.time()
-    current_fds: dict[int, set[tuple[int, str]]] = {}
+    current_fds: dict[int, set[tuple[int, str]]] = {}  # Use dict, set, tuple
     record_count = 0
     lines_processed = 0
 
@@ -173,6 +189,7 @@ async def _perform_lsof_poll_async(
             pid = record.get("pid")
             fd = record.get("fd")
             path = record.get("path")
+            # Only track numeric FDs for close detection
             if pid and fd is not None and path:
                 current_fds.setdefault(pid, set()).add((fd, path))
             _process_lsof_record(record, monitor, timestamp)  # Update monitor (sync)
@@ -213,7 +230,7 @@ class LsofBackend(Backend):
         self.poll_interval = poll_interval
         # State is managed within the run methods
 
-    async def attach(self, pids: list[int]):
+    async def attach(self, pids: list[int]):  # Use list instead of List
         """Implementation of the attach method."""
         if not pids:
             log.warning("LsofBackend.attach called with no PIDs.")
@@ -222,8 +239,8 @@ class LsofBackend(Backend):
         log.info(
             f"Starting lsof attach monitoring loop. PIDs: {pids}, Poll Interval: {self.poll_interval}s"
         )
-        monitored_pids: set[int] = set(pids)
-        seen_fds: dict[int, set[tuple[int, str]]] = {}
+        monitored_pids: set[int] = set(pids)  # Use set instead of Set
+        seen_fds: dict[int, set[tuple[int, str]]] = {}  # Use dict, set, tuple
         # track_descendants = False # Attach never tracks descendants
 
         try:
