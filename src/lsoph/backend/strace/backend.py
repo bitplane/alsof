@@ -61,10 +61,6 @@ DEFAULT_SYSCALLS = sorted(
 # --- End Constants ---
 
 
-# --- Event Processing Helper ---
-# _process_single_event remains unchanged
-
-
 async def _process_single_event(
     event: Syscall, monitor: Monitor, cwd_map: dict[int, str]
 ):
@@ -410,8 +406,3 @@ class Strace(Backend):  # Renamed from StraceBackend
             log.debug(
                 f"Backend {self.__class__.__name__} stop already signalled."
             )  # Use class name
-
-    # --- End Stop Method ---
-
-
-# --- End Backend Class ---

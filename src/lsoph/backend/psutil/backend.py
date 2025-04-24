@@ -1,165 +1,46 @@
-# Filename: src/lsoph/backend/psutil.py
+# Filename: src/lsoph/backend/psutil/backend.py
+"""Psutil backend implementation using polling."""
+
 import asyncio
 import logging
 import os
-import subprocess
 import time
 from typing import Any
 
-# Attempt to import psutil and handle failure gracefully
-try:
-    import psutil
-
-    PSUTIL_AVAILABLE = True
-except ImportError:
-    psutil = None  # Set to None if import fails
-    PSUTIL_AVAILABLE = False
-
 from lsoph.monitor import Monitor
 
-from .base import Backend
+# Import the base class using relative path
+from ..base import Backend
 
-log = logging.getLogger("lsoph.backend.psutil")
+# Import helper functions and availability check from sibling module
+from .helpers import (
+    PSUTIL_AVAILABLE,
+    _get_process_cwd,
+    _get_process_descendants,
+    _get_process_info,
+    _get_process_open_files,
+)
+
+# Import psutil conditionally for type hints if available
+if PSUTIL_AVAILABLE:
+    import psutil
+else:
+    # Define a placeholder if psutil is not available for type hinting
+    # This helps linters but won't be used at runtime if PSUTIL_AVAILABLE is False.
+    class PsutilProcessPlaceholder:
+        pid: int
+
+    psutil = None  # Ensure psutil is None if not imported
+
+
+log = logging.getLogger(__name__)  # Use specific logger
 
 # --- Constants ---
 DEFAULT_PSUTIL_POLL_INTERVAL = 0.5
 
 
-# --- Helper Functions (remain synchronous as psutil is sync) ---
-# These functions remain unchanged but are used by the renamed class below
-
-
-def _get_process_info(pid: int) -> psutil.Process | None:
-    """Safely get a psutil.Process object."""
-    if not PSUTIL_AVAILABLE:
-        return None  # Guard clause
-    try:
-        return psutil.Process(pid)
-    except (psutil.NoSuchProcess, psutil.AccessDenied, Exception) as e:
-        # Log non-NoSuchProcess errors at debug level
-        if not isinstance(e, psutil.NoSuchProcess):
-            log.debug(f"Error getting psutil.Process for PID {pid}: {type(e).__name__}")
-        return None
-
-
-def _get_process_cwd(proc: psutil.Process) -> str | None:
-    """Safely get the current working directory."""
-    if not PSUTIL_AVAILABLE:
-        return None  # Guard clause
-    try:
-        return proc.cwd()
-    except (
-        psutil.NoSuchProcess,
-        psutil.AccessDenied,
-        psutil.ZombieProcess,
-        Exception,
-    ) as e:
-        log.debug(f"Could not get CWD for PID {proc.pid}: {type(e).__name__}")
-        return None
-
-
-def _get_process_open_files(
-    proc: psutil.Process,
-) -> list[dict[str, Any]]:  # Use list and dict
-    """Safely get open files and connections for a process."""
-    if not PSUTIL_AVAILABLE:
-        return []  # Guard clause
-
-    open_files_data: list[dict[str, Any]] = []  # Use list and dict
-    pid = proc.pid
-    try:  # Get regular files
-        for f in proc.open_files():
-            # Ensure path is a string, handle potential issues
-            path = str(f.path) if hasattr(f, "path") and f.path else f"<FD:{f.fd}>"
-            open_files_data.append(
-                {
-                    "path": path,
-                    "fd": f.fd,
-                    "mode": getattr(f, "mode", ""),  # Use getattr for safety
-                    "type": "file",
-                }
-            )
-    except (
-        psutil.NoSuchProcess,
-        psutil.AccessDenied,
-        psutil.ZombieProcess,
-        Exception,
-    ) as e:
-        log.debug(f"Error accessing open files for PID {pid}: {type(e).__name__}")
-
-    try:  # Get connections
-        for conn in proc.connections(kind="all"):
-            try:
-                # Simplify connection string representation
-                if conn.laddr:
-                    laddr_str = f"{conn.laddr.ip}:{conn.laddr.port}"
-                else:
-                    laddr_str = "<?:?>"
-                if conn.raddr:
-                    # Check if raddr has ip and port attributes
-                    if hasattr(conn.raddr, "ip") and hasattr(conn.raddr, "port"):
-                        raddr_str = f"{conn.raddr.ip}:{conn.raddr.port}"
-                    else:  # Handle cases like UNIX sockets where raddr might be a path string
-                        raddr_str = str(conn.raddr) if conn.raddr else ""
-                else:
-                    raddr_str = ""
-
-                conn_type_str = (
-                    conn.type.name if hasattr(conn.type, "name") else str(conn.type)
-                )
-
-                if conn.status == psutil.CONN_ESTABLISHED and raddr_str:
-                    path = f"<SOCKET:{conn_type_str}:{laddr_str}->{raddr_str}>"
-                elif conn.status == psutil.CONN_LISTEN:
-                    path = f"<SOCKET_LISTEN:{conn_type_str}:{laddr_str}>"
-                else:
-                    path = f"<SOCKET:{conn_type_str}:{laddr_str} fd={conn.fd} status={conn.status}>"
-
-                open_files_data.append(
-                    {
-                        "path": path,
-                        "fd": conn.fd if conn.fd != -1 else -1,  # Use -1 for invalid FD
-                        "mode": "rw",  # Assume read/write for sockets
-                        "type": "socket",
-                    }
-                )
-            except (AttributeError, ValueError) as conn_err:
-                log.debug(
-                    f"Error formatting connection details for PID {pid}: {conn_err} - {conn}"
-                )
-    except (
-        psutil.NoSuchProcess,
-        psutil.AccessDenied,
-        psutil.ZombieProcess,
-        Exception,
-    ) as e:
-        log.debug(f"Error accessing connections for PID {pid}: {type(e).__name__}")
-    return open_files_data
-
-
-def _get_process_descendants(
-    proc: psutil.Process,
-) -> list[int]:  # Use list
-    """Safely get all descendant PIDs."""
-    if not PSUTIL_AVAILABLE:
-        return []  # Guard clause
-    try:
-        # Use list comprehension directly
-        return [p.pid for p in proc.children(recursive=True)]
-    except (
-        psutil.NoSuchProcess,
-        psutil.AccessDenied,
-        psutil.ZombieProcess,
-        Exception,
-    ) as e:
-        log.debug(f"Could not get descendants for PID {proc.pid}: {type(e).__name__}")
-        return []
-
-
 # --- Async Backend Class ---
-
-
-class Psutil(Backend):  # Renamed from PsutilBackend
+class Psutil(Backend):
     """Async backend implementation using psutil polling."""
 
     # Class attribute for the command-line name
@@ -185,11 +66,13 @@ class Psutil(Backend):  # Renamed from PsutilBackend
         return PSUTIL_AVAILABLE
 
     # --- Internal Helpers used by _poll_cycle ---
+    # These methods remain part of the class as they operate on instance state or caches.
+
     def _update_cwd_cache(
         self,
         pid: int,
-        proc: psutil.Process | None,
-        pid_cwd_cache: dict,  # Use dict
+        proc: "psutil.Process | None",  # Use psutil.Process if available
+        pid_cwd_cache: dict[int, str | None],
     ):
         """Updates the CWD cache if the PID is not already present."""
         if proc and pid not in pid_cwd_cache:
@@ -197,8 +80,8 @@ class Psutil(Backend):  # Renamed from PsutilBackend
             pid_cwd_cache[pid] = cwd  # Store None if CWD retrieval failed
 
     def _resolve_path(
-        self, pid: int, path: str, pid_cwd_cache: dict
-    ) -> str:  # Use dict
+        self, pid: int, path: str, pid_cwd_cache: dict[int, str | None]
+    ) -> str:
         """Resolves a relative path using the cached CWD."""
         # Check for absolute paths (Unix/Windows) or special markers
         if path.startswith(("/", "<", "@")) or (len(path) > 1 and path[1] == ":"):
@@ -218,13 +101,14 @@ class Psutil(Backend):  # Renamed from PsutilBackend
     def _process_pid_files(
         self,
         pid: int,
-        proc: psutil.Process,
+        proc: "psutil.Process",  # Use psutil.Process if available
         timestamp: float,
-        pid_cwd_cache: dict,  # Use dict
-        seen_fds: dict,  # Use dict
+        pid_cwd_cache: dict[int, str | None],
+        seen_fds: dict[int, dict[int, tuple[str, bool, bool]]],
     ) -> set[int]:
         """Processes open files for a single PID, updating monitor state."""
         current_pid_fds: set[int] = set()
+        # Use helper from helpers module
         open_files_data = _get_process_open_files(proc)
 
         for file_info in open_files_data:
@@ -298,7 +182,7 @@ class Psutil(Backend):  # Renamed from PsutilBackend
         pid: int,
         current_pid_fds: set[int],
         timestamp: float,
-        seen_fds: dict,  # Use dict
+        seen_fds: dict[int, dict[int, tuple[str, bool, bool]]],
     ):
         """Detects and reports closed FDs by comparing current and previous state."""
         if pid not in seen_fds:
@@ -325,9 +209,9 @@ class Psutil(Backend):  # Renamed from PsutilBackend
     def _poll_cycle(
         self,
         monitored_pids: set[int],
-        pid_exists_status: dict,  # Use dict
-        pid_cwd_cache: dict,  # Use dict
-        seen_fds: dict,  # Use dict
+        pid_exists_status: dict[int, bool],
+        pid_cwd_cache: dict[int, str | None],
+        seen_fds: dict[int, dict[int, tuple[str, bool, bool]]],
         track_descendants: bool,
     ) -> set[int]:
         """
@@ -395,6 +279,8 @@ class Psutil(Backend):  # Renamed from PsutilBackend
                 # If process is gone, ensure all its cached FDs are marked as closed
                 if pid in seen_fds:
                     self._detect_and_handle_closures(pid, set(), timestamp, seen_fds)
+                # Signal process exit to the monitor for general cleanup related to the PID
+                self.monitor.process_exit(pid, timestamp)
 
         # --- Cleanup Stale PID entries ---
         pids_to_remove = {
@@ -500,3 +386,6 @@ class Psutil(Backend):  # Renamed from PsutilBackend
         await self._run_loop(initial_pids=pids, track_descendants=True)
 
     # run_command is inherited from the base class
+    # The base implementation starts the command and then calls self.attach([pid]).
+    # Since our attach now handles descendants, run_command will effectively
+    # monitor the initial command and all its descendants using this Psutil backend.
