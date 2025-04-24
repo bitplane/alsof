@@ -20,6 +20,43 @@ LSOF_COMMAND_TIMEOUT = 10.0
 
 
 # --- Async I/O Logic ---
+
+
+# Define helper function outside the main try block
+async def _read_stream(
+    stream: asyncio.StreamReader | None,
+    stream_name: str,
+    process_pid: int | str,
+    timeout: float,
+) -> list[str]:
+    """Reads lines from a stream with a timeout."""
+    lines = []
+    if not stream:
+        return lines
+    while True:
+        try:
+            # Use wait_for for readline to prevent hangs on the stream read itself
+            line_bytes = await asyncio.wait_for(stream.readline(), timeout=timeout)
+        except asyncio.TimeoutError:
+            # Log timeout reading the stream, but the process might still finish
+            log.error(f"Timeout reading {stream_name} from lsof (PID {process_pid}).")
+            # Don't kill the process here, let the outer timeout handle it
+            # if the process itself hangs.
+            break  # Stop reading this stream
+        except asyncio.IncompleteReadError as read_err:
+            # Can happen if process exits while reading
+            log.debug(f"Incomplete read from lsof {stream_name}: {read_err}")
+            break
+        except Exception as read_err:
+            log.error(f"Error reading lsof {stream_name}: {read_err}")
+            break  # Stop reading on other errors
+
+        if not line_bytes:
+            break  # EOF reached
+        lines.append(line_bytes.decode("utf-8", errors="replace").strip())
+    return lines
+
+
 async def _run_lsof_command_async(
     pids: list[int] | None = None,
 ) -> AsyncIterator[str]:
@@ -40,13 +77,8 @@ async def _run_lsof_command_async(
         valid_pids = [str(p) for p in pids if p > 0]
         if not valid_pids:
             log.warning("lsof called with no valid PIDs to monitor.")
-
-            # Return an empty async iterator immediately
-            async def _empty_iterator():
-                if False:
-                    yield  # pragma: no cover
-
-            return _empty_iterator()
+            # Use a bare return to stop the async generator, yielding nothing.
+            return
 
         cmd.extend(["-p", ",".join(valid_pids)])
         log.debug(f"Running lsof for PIDs: {valid_pids}")
@@ -63,47 +95,19 @@ async def _run_lsof_command_async(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,  # Capture stderr as well
         )
-        log.debug(f"lsof process started with PID: {process.pid}")
-
-        # Read stdout and stderr concurrently to prevent deadlocks
-        async def read_stream(
-            stream: asyncio.StreamReader | None, stream_name: str
-        ) -> list[str]:
-            """Reads lines from a stream with a timeout."""
-            lines = []
-            if not stream:
-                return lines
-            while True:
-                try:
-                    # Use wait_for for readline to prevent hangs on the stream read itself
-                    line_bytes = await asyncio.wait_for(
-                        stream.readline(), timeout=LSOF_COMMAND_TIMEOUT / 2
-                    )
-                except asyncio.TimeoutError:
-                    # Log timeout reading the stream, but the process might still finish
-                    log.error(
-                        f"Timeout reading {stream_name} from lsof (PID {process.pid if process else 'N/A'})."
-                    )
-                    # Don't kill the process here, let the outer timeout handle it
-                    # if the process itself hangs.
-                    break  # Stop reading this stream
-                except asyncio.IncompleteReadError as read_err:
-                    # Can happen if process exits while reading
-                    log.debug(f"Incomplete read from lsof {stream_name}: {read_err}")
-                    break
-                except Exception as read_err:
-                    log.error(f"Error reading lsof {stream_name}: {read_err}")
-                    break  # Stop reading on other errors
-
-                if not line_bytes:
-                    break  # EOF reached
-                lines.append(line_bytes.decode("utf-8", errors="replace").strip())
-            return lines
+        process_pid_str = str(process.pid) if process.pid else "N/A"
+        log.debug(f"lsof process started with PID: {process_pid_str}")
 
         # Wait for the process and stream readers to complete, with an overall timeout
         try:
-            stdout_task = asyncio.create_task(read_stream(process.stdout, "stdout"))
-            stderr_task = asyncio.create_task(read_stream(process.stderr, "stderr"))
+            # Pass necessary info to the helper function
+            read_timeout = LSOF_COMMAND_TIMEOUT / 2
+            stdout_task = asyncio.create_task(
+                _read_stream(process.stdout, "stdout", process_pid_str, read_timeout)
+            )
+            stderr_task = asyncio.create_task(
+                _read_stream(process.stderr, "stderr", process_pid_str, read_timeout)
+            )
             process_wait_task = asyncio.create_task(process.wait())
 
             # Wait for all tasks (streams reading + process exit)
@@ -116,7 +120,7 @@ async def _run_lsof_command_async(
             # Check if the process itself timed out (didn't complete)
             if process_wait_task not in done:
                 log.error(
-                    f"lsof command (PID {process.pid}) timed out after {LSOF_COMMAND_TIMEOUT}s."
+                    f"lsof command (PID {process_pid_str}) timed out after {LSOF_COMMAND_TIMEOUT}s."
                 )
                 # Cancel pending stream readers
                 for task in pending:
@@ -130,7 +134,7 @@ async def _run_lsof_command_async(
                             pass
                 # Kill the hung process
                 if process.returncode is None:
-                    log.warning(f"Killing timed-out lsof process {process.pid}")
+                    log.warning(f"Killing timed-out lsof process {process_pid_str}")
                     try:
                         process.kill()
                         await process.wait()  # Wait for kill confirmation
@@ -148,7 +152,7 @@ async def _run_lsof_command_async(
             # Log stderr if any content was captured
             if stderr_lines:
                 log.debug(
-                    f"lsof stderr (PID {process.pid}, Exit Code {return_code}):\n"
+                    f"lsof stderr (PID {process_pid_str}, Exit Code {return_code}):\n"
                     + "\n".join(stderr_lines)
                 )
 
@@ -202,7 +206,8 @@ def _process_lsof_record(
     # This ensures we don't process events for paths the user wants ignored
     info = monitor._get_or_create_fileinfo(path, timestamp)
     if not info:
-        log.trace(f"Skipping lsof record for ignored/invalid path: {path}")  # type: ignore
+        # Using trace level logging requires a custom setup or library like 'loguru'
+        # log.trace(f"Skipping lsof record for ignored/invalid path: {path}")
         return  # Path was ignored or invalid
 
     fd = record.get("fd")
@@ -222,7 +227,7 @@ def _process_lsof_record(
     # Handle different types of entries based on FD presence/value
     if fd is None:  # Special file type (cwd, txt, mem, DEL, etc.)
         # Treat these as access/stat operations in the monitor
-        log.trace(f"Processing lsof special entry: PID={pid}, FD={fd_str}, Path={path}")  # type: ignore
+        # log.trace(f"Processing lsof special entry: PID={pid}, FD={fd_str}, Path={path}")
         monitor.stat(pid, path, True, timestamp, **details)
         # Specific logging for deleted-but-mapped files
         if fd_str == "DEL":
@@ -230,7 +235,7 @@ def _process_lsof_record(
             # Consider adding a specific status or detail for this case in FileInfo?
     elif fd >= 0:
         # Regular file descriptor
-        log.trace(f"Processing lsof FD entry: PID={pid}, FD={fd}, Path={path}, Mode={mode}")  # type: ignore
+        # log.trace(f"Processing lsof FD entry: PID={pid}, FD={fd}, Path={path}, Mode={mode}")
         # Report open event (idempotent, ensures FD is mapped)
         monitor.open(pid, path, fd, True, timestamp, **details)
 
@@ -334,7 +339,7 @@ async def _perform_lsof_poll_async(
             for fd, path in previous_pid_fds:
                 if (fd, path) not in current_pid_fds:
                     # This specific (FD, Path) tuple existed before but not now -> closed
-                    log.trace(f"Detected close: PID={pid}, FD={fd}, Path={path}")  # type: ignore
+                    # log.trace(f"Detected close: PID={pid}, FD={fd}, Path={path}")
                     monitor.close(pid, fd, True, timestamp, source="lsof_poll")
                     close_count += 1
         else:
@@ -345,7 +350,7 @@ async def _perform_lsof_poll_async(
             )
             previous_pid_fds = seen_fds.get(pid, set())
             for fd, path in previous_pid_fds:
-                log.trace(f"Closing FD {fd} for exited PID {pid} (Path: {path})")  # type: ignore
+                # log.trace(f"Closing FD {fd} for exited PID {pid} (Path: {path})")
                 monitor.close(pid, fd, True, timestamp, source="lsof_poll_exit")
                 close_count += 1
             # Signal process exit to the monitor for general cleanup related to the PID
