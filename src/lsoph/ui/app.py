@@ -63,7 +63,8 @@ class LsophApp(App[None]):
         Binding("ctrl+d", "dump_monitor", "Dump Monitor", show=False),
     ]
 
-    CSS_PATH = "style.css"  # Load CSS from file
+    # REMEMBER: User renamed CSS file
+    CSS_PATH = "style.css"
 
     # Reactive variables to trigger updates
     last_monitor_version = reactive(-1)
@@ -265,8 +266,11 @@ class LsophApp(App[None]):
 
     def action_ignore_selected(self) -> None:
         """Action to ignore the currently selected file path."""
-        # Added screen check in _ensure_table_focused
-        if not self._ensure_table_focused():
+        # --- REMOVED FOCUS CHECK ---
+        # if not self._ensure_table_focused(): return
+        # --- ADDED SCREEN CHECK ---
+        if self.screen is not self:
+            log.debug("Ignoring action_ignore_selected as modal screen is active.")
             return
 
         path_to_ignore = self._file_table.selected_path
@@ -280,8 +284,11 @@ class LsophApp(App[None]):
 
     def action_ignore_all(self) -> None:
         """Action to ignore all currently tracked files."""
-        # Added screen check in _ensure_table_focused
-        if not self._ensure_table_focused():
+        # --- REMOVED FOCUS CHECK ---
+        # if not self._ensure_table_focused(): return
+        # --- ADDED SCREEN CHECK ---
+        if self.screen is not self:
+            log.debug("Ignoring action_ignore_all as modal screen is active.")
             return
 
         log.info("Ignoring all tracked files.")
@@ -305,8 +312,8 @@ class LsophApp(App[None]):
 
     # This action is bound to 'i' and requires focus check
     def action_show_detail(self) -> None:
-        """Shows the detail screen for the selected row (requires focus)."""
-        # Added screen check in _ensure_table_focused
+        """Shows the detail screen for the selected row (requires focus check)."""
+        # Keep focus check for the 'i' key binding
         if not self._ensure_table_focused():
             return
         self._show_detail_for_selected_row()
