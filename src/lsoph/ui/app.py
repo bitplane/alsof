@@ -123,12 +123,21 @@ class LsophApp(App[None]):
     SUB_TITLE = "Monitoring file activity..."
 
     BINDINGS = [
+        # --- Always Visible Bindings ---
         Binding("q,escape", "quit", "Quit", show=True),
-        Binding("x", "ignore_all", "Ignore All", show=True),
-        Binding("i,backspace,delete", "ignore_selected", "Ignore Sel.", show=True),
         Binding("l,ctrl+l", "show_log", "Show/Hide Log", show=True),
-        Binding("d,enter", "show_detail", "Show Detail", show=True),
-        Binding("ctrl+d", "dump_monitor", "Dump Monitor", show=False),  # Debug binding
+        # --- Contextual Bindings (Hidden by default, work on main screen) ---
+        Binding(
+            "x", "ignore_all", "Ignore All", show=False
+        ),  # <-- Changed show to False
+        Binding(
+            "i,backspace,delete", "ignore_selected", "Ignore Sel.", show=False
+        ),  # <-- Changed show to False
+        Binding(
+            "d,enter", "show_detail", "Show Detail", show=False
+        ),  # <-- Changed show to False
+        # --- Debug Bindings (Always hidden) ---
+        Binding("ctrl+d", "dump_monitor", "Dump Monitor", show=False),
     ]
 
     CSS_PATH = "app.css"  # Load CSS from file
@@ -409,7 +418,12 @@ class LsophApp(App[None]):
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Handle row selection (e.g., by Enter key) - show details."""
-        self.action_show_detail()
+        # Only show detail if the main screen is active (not a modal)
+        if isinstance(
+            self.screen, LsophApp
+        ):  # Check if it's the main app screen instance
+            self.action_show_detail()
+        # If a modal screen is active, Enter might do something else or nothing
 
     # --- Actions ---
 
@@ -438,6 +452,15 @@ class LsophApp(App[None]):
 
     def action_ignore_selected(self) -> None:
         """Action to ignore the currently selected file path."""
+        # Check if the main screen's DataTable is focused
+        try:
+            table = self.query_one(DataTable)
+            if not table.has_focus:
+                log.debug("Ignore selected action ignored: Main table not focused.")
+                return  # Don't ignore if table isn't focused
+        except Exception:
+            return  # Don't ignore if table doesn't exist
+
         path_to_ignore = self._get_selected_path()
         if not path_to_ignore:
             self.notify("No row selected.", severity="warning", timeout=2)
@@ -445,7 +468,6 @@ class LsophApp(App[None]):
 
         log.info(f"Ignoring selected path: {path_to_ignore}")
         try:
-            table = self.query_one(DataTable)
             original_row_index = table.cursor_row  # Store index before modification
             self.monitor.ignore(path_to_ignore)  # Tell monitor to ignore
             # Schedule cursor adjustment after the table update triggered by monitor change
@@ -473,6 +495,15 @@ class LsophApp(App[None]):
 
     def action_ignore_all(self) -> None:
         """Action to ignore all currently tracked files."""
+        # Check if the main screen's DataTable is focused
+        try:
+            table = self.query_one(DataTable)
+            if not table.has_focus:
+                log.debug("Ignore all action ignored: Main table not focused.")
+                return  # Don't ignore if table isn't focused
+        except Exception:
+            return  # Don't ignore if table doesn't exist
+
         log.info("Ignoring all tracked files.")
         try:
             # Count active files before ignoring
@@ -514,6 +545,15 @@ class LsophApp(App[None]):
 
     def action_show_detail(self) -> None:
         """Shows the detail screen for the selected row."""
+        # Check if the main screen's DataTable is focused
+        try:
+            table = self.query_one(DataTable)
+            if not table.has_focus:
+                log.debug("Show detail action ignored: Main table not focused.")
+                return  # Don't show detail if table isn't focused
+        except Exception:
+            return  # Don't show detail if table doesn't exist
+
         path = self._get_selected_path()
         if not path:
             self.notify("No row selected.", severity="warning", timeout=2)
