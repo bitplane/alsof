@@ -30,7 +30,7 @@ log = logging.getLogger(__name__)
 
 # --- Constants ---
 # Restore -qq to suppress attach/detach/exit messages for cleaner parsing
-STRACE_BASE_OPTIONS = ["-f", "-qq", "-s", "4096", "-xx", "-o", "/dev/stderr"]
+STRACE_BASE_OPTIONS = ["-f", "-qq", "-s", "4096", "-o", "/dev/stderr"]
 # Define default syscalls here
 FILE_STRUCT_SYSCALLS = [
     "open",

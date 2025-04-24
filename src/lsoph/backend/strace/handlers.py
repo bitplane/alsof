@@ -42,8 +42,8 @@ def _handle_open_creat(event: Syscall, monitor: Monitor, cwd_map: dict[int, str]
         fd_val = helpers.parse_result_int(event.result_str) if success else -1
         fd = fd_val if fd_val is not None else -1  # Ensure fd is int
         monitor.open(pid, path, fd, success, timestamp, **details)
-    else:
-        log.warning(f"Could not determine path for {event.syscall} event: {event!r}")
+    # else: # Reduced logging
+    #     log.warning(f"Could not determine path for {event.syscall} event: {event!r}")
 
 
 def _handle_close(event: Syscall, monitor: Monitor, cwd_map: dict[int, str]):
@@ -56,8 +56,8 @@ def _handle_close(event: Syscall, monitor: Monitor, cwd_map: dict[int, str]):
 
     if fd_arg is not None:
         monitor.close(pid, fd_arg, success, timestamp, **details)
-    else:
-        log.warning(f"Could not parse FD for close event: {event!r}")
+    # else: # Reduced logging
+    #     log.warning(f"Could not parse FD for close event: {event!r}")
 
 
 def _handle_read_write(event: Syscall, monitor: Monitor, cwd_map: dict[int, str]):
@@ -69,7 +69,7 @@ def _handle_read_write(event: Syscall, monitor: Monitor, cwd_map: dict[int, str]
     fd_arg = helpers.parse_result_int(fd_arg_str) if fd_arg_str else None
 
     if fd_arg is None:
-        log.warning(f"No valid FD found for {event.syscall} event: {event!r}")
+        # log.warning(f"No valid FD found for {event.syscall} event: {event!r}") # Reduced logging
         return
 
     # Get path from monitor state based on FD
@@ -77,9 +77,7 @@ def _handle_read_write(event: Syscall, monitor: Monitor, cwd_map: dict[int, str]
     # If path is None here, it means the FD wasn't tracked (e.g., socket, pipe)
     # Proceed only if path is known.
     if path is None:
-        log.debug(
-            f"Path for {event.syscall} on PID {pid} FD {fd_arg} is unknown, skipping monitor update."
-        )
+        # log.debug(f"Path for {event.syscall} on PID {pid} FD {fd_arg} is unknown, skipping monitor update.") # Reduced logging
         return
 
     byte_count_val = helpers.parse_result_int(event.result_str) if success else 0
@@ -112,8 +110,8 @@ def _handle_stat(event: Syscall, monitor: Monitor, cwd_map: dict[int, str]):
 
     if path is not None:
         monitor.stat(pid, path, success, timestamp, **details)
-    else:
-        log.warning(f"Could not determine path for {event.syscall} event: {event!r}")
+    # else: # Reduced logging
+    #     log.warning(f"Could not determine path for {event.syscall} event: {event!r}")
 
 
 def _handle_delete(event: Syscall, monitor: Monitor, cwd_map: dict[int, str]):
@@ -136,8 +134,8 @@ def _handle_delete(event: Syscall, monitor: Monitor, cwd_map: dict[int, str]):
 
     if path is not None:
         monitor.delete(pid, path, success, timestamp, **details)
-    else:
-        log.warning(f"Could not determine path for {event.syscall} event: {event!r}")
+    # else: # Reduced logging
+    #     log.warning(f"Could not determine path for {event.syscall} event: {event!r}")
 
 
 def _handle_rename(event: Syscall, monitor: Monitor, cwd_map: dict[int, str]):
@@ -180,10 +178,10 @@ def _handle_rename(event: Syscall, monitor: Monitor, cwd_map: dict[int, str]):
 
     if old_path and new_path:
         monitor.rename(pid, old_path, new_path, success, timestamp, **details)
-    else:
-        log.warning(
-            f"Could not determine old or new path for {event.syscall} event: {event!r}"
-        )
+    # else: # Reduced logging
+    #     log.warning(
+    #         f"Could not determine old or new path for {event.syscall} event: {event!r}"
+    #     )
 
 
 # --- Syscall Dispatcher ---
@@ -219,32 +217,36 @@ def update_cwd(pid: int, cwd_map: dict[int, str], monitor: Monitor, event: Sysca
     success, timestamp = event.error_name is None, event.timestamp
     details: dict[str, Any] = {"syscall": event.syscall}
     new_cwd: str | None = None
+    # Store the path argument separately, don't put it in details initially
+    path_for_stat_call: str | None = None
 
     if event.syscall == "chdir":
         path_arg = helpers.clean_path_arg(event.args[0] if event.args else None)
         if path_arg:
             resolved_path = helpers.resolve_path(pid, path_arg, cwd_map, monitor)
             if resolved_path:
+                path_for_stat_call = resolved_path  # Use resolved path for stat
                 if success:
                     new_cwd = resolved_path
-                details["path"] = resolved_path  # Record attempted path even on failure
+                # details["path"] = resolved_path # REMOVED
             else:
-                log.warning(f"Could not resolve chdir path '{path_arg}' for PID {pid}")
-                details["path"] = path_arg  # Record original arg if resolve failed
+                # If resolve failed, still record the original arg for stat
+                path_for_stat_call = path_arg
+                # details["path"] = path_arg # REMOVED
         else:
             log.warning(f"chdir syscall for PID {pid} missing path argument: {event!r}")
 
     elif event.syscall == "fchdir":
-        # Ensure arg is string before parsing
         fd_arg_str = str(event.args[0]) if event.args else None
         fd_arg = helpers.parse_result_int(fd_arg_str) if fd_arg_str else None
         if fd_arg is not None:
             details["fd"] = fd_arg
             target_path = monitor.get_path(pid, fd_arg)
             if target_path:
+                path_for_stat_call = target_path  # Use target path for stat
                 if success:
                     new_cwd = target_path
-                details["target_path"] = target_path  # Record target path
+                # details["target_path"] = target_path # REMOVED
             else:
                 log.warning(f"fchdir(fd={fd_arg}) target path unknown for PID {pid}.")
         else:
@@ -252,18 +254,20 @@ def update_cwd(pid: int, cwd_map: dict[int, str], monitor: Monitor, event: Sysca
                 f"fchdir syscall for PID {pid} has invalid FD argument: {event.args}"
             )
 
-    # Update CWD map and call monitor.stat
+    # Update CWD map if successful
     if success and new_cwd:
         cwd_map[pid] = new_cwd
-        monitor.stat(pid, new_cwd, success, timestamp, **details)
         log.info(f"PID {pid} changed CWD via {event.syscall} to: {new_cwd}")
-    elif not success and ("path" in details or "target_path" in details):
-        # If failed, still call stat on the *attempted* target path if known
-        path_for_stat = details.get("path") or details.get("target_path")
-        if path_for_stat:
-            monitor.stat(pid, path_for_stat, success, timestamp, **details)
+
+    # Always call monitor.stat with the path determined above
+    # Ensure details does NOT contain 'path' or 'target_path'
+    details.pop("path", None)
+    details.pop("target_path", None)
+    if path_for_stat_call:
+        monitor.stat(pid, path_for_stat_call, success, timestamp, **details)
     elif not success:
-        # Failed, but target path wasn't determined
+        # Failed, but target path wasn't determined (e.g., bad FD in fchdir)
         log.warning(
             f"{event.syscall} failed for PID {pid}, but target path unknown: {event!r}"
         )
+        # Optionally call stat with a placeholder or skip? Skipping for now.
