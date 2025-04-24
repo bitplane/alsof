@@ -41,6 +41,7 @@ class DetailScreen(Screen):
 
     def _create_header_text(self) -> Text:
         """Creates the header text displayed above the table."""
+        # (This function remains the same as before)
         path_display = short_path(self.file_info.path, 100)
         status = self.file_info.status.upper()
         style = ""
@@ -65,13 +66,13 @@ class DetailScreen(Screen):
 
             # Add columns to the DataTable
             table.add_column("Timestamp", key="ts", width=12)
-            table.add_column("Event", key="event", width=8)
-            table.add_column("Result", key="result", width=6)
-            # Add new column for Emoji Meaning
-            table.add_column("Action", key="action", width=10)
             table.add_column(
-                "Details", key="details", width=70
-            )  # Adjusted width slightly
+                "Event", key="event", width=12
+            )  # Adjusted width slightly for emoji
+            table.add_column("Result", key="result", width=6)
+            # REMOVED Action column
+            # Let Details column be flexible - NO width specified
+            table.add_column("Details", key="details")
 
             history = self.file_info.event_history
             log.debug(
@@ -83,11 +84,6 @@ class DetailScreen(Screen):
                     Text("No event history recorded for this file.", style="dim")
                 )
                 return
-
-            # Reverse map for finding meaning from emoji (handle potential duplicates if needed)
-            # For simplicity, we'll look up based on event type directly.
-            # emoji_to_meaning = {v: k for k, v in EVENT_EMOJI_MAP.items()}
-            # status_emoji_to_meaning = {v: k for k, v in STATUS_EMOJI_MAP.items()}
 
             # Write each event from history as a row
             for event in history:
@@ -103,31 +99,26 @@ class DetailScreen(Screen):
                     log.warning(f"Could not format timestamp {ts_raw}: {ts_err}")
                 ts_text = Text(ts_str)
 
-                # Format event type
+                # Get Event Type and Success
                 event_type_str = str(event.get("type", "?")).upper()
-                etype_text = Text(event_type_str)
+                success = event.get("success", True)  # Default to True if missing
+
+                # Determine Emoji
+                emoji = DEFAULT_EMOJI
+                if not success:
+                    emoji = EVENT_EMOJI_MAP.get("ERROR", DEFAULT_EMOJI)
+                else:
+                    emoji = EVENT_EMOJI_MAP.get(event_type_str, DEFAULT_EMOJI)
+
+                # Create Event Text with Emoji Prefix
+                etype_text = Text(f"{emoji} {event_type_str}")
 
                 # Format result (OK/FAIL)
-                success = event.get("success", True)  # Default to True if missing
                 result_text = (
                     Text("OK", style="green") if success else Text("FAIL", style="red")
                 )
 
-                # Determine Action/Meaning based on event type and success
-                action_str = "???"
-                if not success:
-                    action_str = "Error"  # Consistent with emoji map
-                else:
-                    # Look up the event type in the map
-                    # Find the key (meaning) corresponding to the emoji value
-                    # This assumes EVENT_EMOJI_MAP values are unique for meanings we care about here
-                    action_str = event_type_str  # Default to event type if no specific emoji meaning needed
-                    # Example: Find 'Open' for '📂' - better to just use event_type_str?
-                    # Let's just use the event type string directly for clarity.
-                    # emoji_for_event = EVENT_EMOJI_MAP.get(event_type_str, DEFAULT_EMOJI)
-                    # action_str = next((k for k, v in EVENT_EMOJI_MAP.items() if v == emoji_for_event), event_type_str)
-
-                action_text = Text(action_str.capitalize())  # Capitalize for display
+                # REMOVED Action column logic
 
                 # Format details dictionary
                 details_dict: dict[str, Any] = event.get("details", {})
@@ -157,15 +148,12 @@ class DetailScreen(Screen):
                         details_parts.append(f"{k}={v!r}")
 
                 details_str = ", ".join(details_parts)
-                details_display = short_path(
-                    details_str.replace("\n", "\\n"), 70
-                )  # Use adjusted width
+                # Use a reasonable max width for shortening details text
+                details_display = short_path(details_str.replace("\n", "\\n"), 100)
                 details_text = Text(details_display)
 
-                # Add the row to the table including the new action column
-                table.add_row(
-                    ts_text, etype_text, result_text, action_text, details_text
-                )
+                # Add the row to the table (without action_text)
+                table.add_row(ts_text, etype_text, result_text, details_text)
 
             # Focus the table after populating
             table.focus()
