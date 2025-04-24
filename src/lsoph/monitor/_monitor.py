@@ -1,6 +1,7 @@
 # Filename: src/lsoph/monitor/_monitor.py
 """
 Contains the Monitor class responsible for managing file access state.
+Stores paths as bytes.
 """
 
 import logging
@@ -19,10 +20,12 @@ log = logging.getLogger("lsoph.monitor")  # Use the same logger name
 
 # --- Constants ---
 # Constants related to standard streams, used by Monitor logic
-STDIN_PATH = "<STDIN>"
-STDOUT_PATH = "<STDOUT>"
-STDERR_PATH = "<STDERR>"
-STD_PATHS: set[str] = {STDIN_PATH, STDOUT_PATH, STDERR_PATH}
+# --- PATHS ARE NOW BYTES ---
+STDIN_PATH = b"<STDIN>"
+STDOUT_PATH = b"<STDOUT>"
+STDERR_PATH = b"<STDERR>"
+STD_PATHS: set[bytes] = {STDIN_PATH, STDOUT_PATH, STDERR_PATH}
+# ------------------------
 
 
 # --- Monitor Class (Manages State for a Monitored Target) ---
@@ -31,37 +34,54 @@ class Monitor(Versioned):
     Manages the state of files accessed by a monitored target (process group).
     Inherits from Versioned for change tracking and thread safety via decorators.
     Provides methods for backends to report file events (open, close, read, etc.).
+    Stores paths as bytes internally.
     """
 
     def __init__(self, identifier: str):
         super().__init__()
         self.identifier = identifier
-        self.ignored_paths: set[str] = set()
-        # Maps PID -> {FD -> Path}
-        self.pid_fd_map: dict[int, dict[int, str]] = {}
-        # Maps Path -> FileInfo
-        self.files: dict[str, FileInfo] = {}
+        # --- PATHS ARE NOW BYTES ---
+        self.ignored_paths: set[bytes] = set()
+        # Maps PID -> {FD -> Path (bytes)}
+        self.pid_fd_map: dict[int, dict[int, bytes]] = {}
+        # Maps Path (bytes) -> FileInfo
+        self.files: dict[bytes, FileInfo] = {}
+        # ------------------------
         self.backend_pid: int | None = None
         log.info(f"Initialized Monitor for identifier: '{identifier}'")
 
     # --- Internal Helper Methods ---
 
-    def _get_or_create_fileinfo(self, path: str, timestamp: float) -> FileInfo | None:
-        """Gets existing FileInfo or creates one. Returns None if ignored/invalid."""
-        if not path or not isinstance(path, str):
-            log.debug(f"Ignoring event for invalid path: {path!r}")
+    def _get_or_create_fileinfo(self, path: bytes, timestamp: float) -> FileInfo | None:
+        """
+        Gets existing FileInfo or creates one. Returns None if ignored/invalid.
+        Accepts and works with bytes paths.
+        """
+        # Check for non-bytes or empty path
+        if not path or not isinstance(path, bytes):
+            # Use fsdecode for safe logging of potential non-decodable bytes
+            log.debug(
+                f"Ignoring event for invalid path: {os.fsdecode(path)!r}"
+                if isinstance(path, bytes)
+                else repr(path)
+            )
             return None
-        # Check against standard streams and ignored paths
+
+        # Check against standard streams and ignored paths (all bytes)
         if path in self.ignored_paths or path in STD_PATHS:
-            log.debug(f"Ignoring event for standard or ignored path: {path}")
+            log.debug(
+                f"Ignoring event for standard or ignored path: {os.fsdecode(path)!r}"
+            )
             return None
-        # Get or create FileInfo entry
+
+        # Get or create FileInfo entry using bytes path as key
         if path not in self.files:
-            log.debug(f"Creating new FileInfo for path: {path}")
-            # Use the imported FileInfo class
+            log.debug(f"Creating new FileInfo for path: {os.fsdecode(path)!r}")
+            # Use the imported FileInfo class, passing bytes path
             self.files[path] = FileInfo(
                 path=path, last_activity_ts=timestamp, status="accessed"
             )
+
         # Update last activity timestamp regardless
         self.files[path].last_activity_ts = timestamp
         return self.files[path]
@@ -92,24 +112,37 @@ class Monitor(Versioned):
             if not info.recent_event_types or info.recent_event_types[-1] != event_type:
                 info.recent_event_types.append(event_type)
 
-    def _update_pid_fd_map(self, pid: int, fd: int, path: str | None):
-        """Safely updates or removes entries in the pid_fd_map."""
+    def _update_pid_fd_map(self, pid: int, fd: int, path: bytes | None):
+        """
+        Safely updates or removes entries in the pid_fd_map.
+        Accepts bytes path.
+        """
         pid_map = self.pid_fd_map.get(pid)
-        current_path = pid_map.get(fd) if pid_map else None
+        current_path: bytes | None = pid_map.get(fd) if pid_map else None
 
         if path:  # Add or update mapping
             if pid not in self.pid_fd_map:
                 self.pid_fd_map[pid] = {}
             # Only log if the path actually changes or is new
             if current_path != path:
-                log.debug(f"Mapping PID {pid} FD {fd} -> '{path}'")
+                # Use fsdecode for safe logging
+                log.debug(f"Mapping PID {pid} FD {fd} -> {os.fsdecode(path)!r}")
                 self.pid_fd_map[pid][fd] = path
         else:  # Remove mapping (path is None)
             if pid_map and fd in pid_map:
-                removed_path = self.pid_fd_map[pid].pop(fd)
-                log.debug(
-                    f"Removed mapping for PID {pid} FD {fd} (was path: '{removed_path}')"
-                )
+                # --- Safely get removed path before pop ---
+                removed_path = pid_map.get(fd)
+                pid_map.pop(fd)  # Remove the FD entry
+                # --- Check removed_path before logging ---
+                if removed_path is not None:
+                    log.debug(
+                        f"Removed mapping for PID {pid} FD {fd} (was path: {os.fsdecode(removed_path)!r})"
+                    )
+                else:
+                    log.debug(
+                        f"Removed mapping for PID {pid} FD {fd} (path was already unknown in map)."
+                    )
+                # -----------------------------------------
                 # Clean up PID entry if it becomes empty
                 if not self.pid_fd_map[pid]:
                     del self.pid_fd_map[pid]
@@ -120,6 +153,7 @@ class Monitor(Versioned):
         """
         Internal helper to remove an FD mapping for a PID and update FileInfo state.
         Handles removal from pid_fd_map and FileInfo.open_by_pids, and updates status.
+        Safely handles cases where the FD has no associated path.
         NOTE: This method modifies state and bumps the version via @changes.
 
         Args:
@@ -130,47 +164,58 @@ class Monitor(Versioned):
             The updated FileInfo object if found and modified, otherwise None.
         """
         log.debug(f"Attempting to remove FD {fd} for PID {pid}")
-        path = self.get_path(pid, fd)  # Get path *before* removing mapping
+        path: bytes | None = self.get_path(
+            pid, fd
+        )  # Get path (bytes) *before* removing mapping
 
-        # 1. Remove from pid_fd_map
-        self._update_pid_fd_map(pid, fd, None)  # Use helper to ensure cleanup
+        # 1. Remove from pid_fd_map (This part is safe even if path was None)
+        self._update_pid_fd_map(pid, fd, None)
 
-        # 2. If path is unknown or standard, no FileInfo to update
-        if not path or path in STD_PATHS:
+        # --- ADDED CHECK: If path is None, we can't update FileInfo ---
+        if path is None:
             log.debug(
-                f"_remove_fd: Path ('{path}') unknown or standard stream. No FileInfo update."
+                f"_remove_fd: No path mapping found for PID {pid} FD {fd}. No FileInfo update needed."
+            )
+            return None
+        # -------------------------------------------------------------
+
+        # 2. If path is standard, no FileInfo to update (path is guaranteed not None here)
+        if path in STD_PATHS:
+            log.debug(
+                f"_remove_fd: Path ('{os.fsdecode(path)!r}') is standard stream. No FileInfo update."
             )
             return None
 
-        # 3. Get FileInfo
+        # 3. Get FileInfo (path is guaranteed not None here)
         info = self.files.get(path)
         if not info:
+            # Use fsdecode safely now that path is not None
             log.warning(
-                f"_remove_fd: Path '{path}' (from PID {pid} FD {fd}) not found in state."
+                f"_remove_fd: Path '{os.fsdecode(path)!r}' (from PID {pid} FD {fd}) not found in state."
             )
             return None
 
-        # 4. Remove from FileInfo.open_by_pids
+        # 4. Remove from FileInfo.open_by_pids (path is not None)
         if pid in info.open_by_pids:
             if fd in info.open_by_pids[pid]:
                 info.open_by_pids[pid].remove(fd)
+                # Use fsdecode safely
                 log.debug(
-                    f"_remove_fd: Removed FD {fd} from open set for PID {pid} ('{path}')"
+                    f"_remove_fd: Removed FD {fd} from open set for PID {pid} ('{os.fsdecode(path)!r}')"
                 )
-            # If set is empty after removal, remove PID entry entirely
             if not info.open_by_pids[pid]:
                 del info.open_by_pids[pid]
+                # Use fsdecode safely
                 log.debug(
-                    f"_remove_fd: Removed PID {pid} from open_by_pids for '{path}'."
+                    f"_remove_fd: Removed PID {pid} from open_by_pids for '{os.fsdecode(path)!r}'."
                 )
 
-        # 5. Update FileInfo.status based on whether *any* process still holds it open
+        # 5. Update FileInfo.status (path is not None)
         if not info.is_open and info.status != "deleted":
             info.status = "closed"
-            log.debug(f"_remove_fd: Path '{path}' marked as closed.")
+            # Use fsdecode safely
+            log.debug(f"_remove_fd: Path '{os.fsdecode(path)!r}' marked as closed.")
         elif info.is_open and info.status != "deleted":
-            # If still open by other PIDs/FDs, keep status as 'open' or 'active'
-            # Let subsequent events like read/write change it to 'active'
             if info.status not in ["open", "active"]:
                 info.status = "open"
 
@@ -216,21 +261,27 @@ class Monitor(Versioned):
     # --- Public Handler Methods ---
 
     @changes
-    def ignore(self, path: str):
-        """Adds a path to the ignore list and removes existing state for it."""
+    def ignore(self, path: bytes):
+        """
+        Adds a bytes path to the ignore list and removes existing state for it.
+        """
+        # Check for non-bytes, empty, standard, or already ignored
         if (
-            not isinstance(path, str)
+            not isinstance(path, bytes)
             or not path
             or path in STD_PATHS
             or path in self.ignored_paths
         ):
-            return  # Ignore invalid, standard, or already ignored paths
-        log.info(f"Adding path to ignore list for '{self.identifier}': {path}")
+            return
+
+        log.info(
+            f"Adding path to ignore list for '{self.identifier}': {os.fsdecode(path)!r}"
+        )
         self.ignored_paths.add(path)
 
         # Remove existing state if present
         if path in self.files:
-            log.debug(f"Removing ignored path from active state: {path}")
+            log.debug(f"Removing ignored path from active state: {os.fsdecode(path)!r}")
             # Clean up FDs associated with this path across all PIDs
             pids_fds_to_remove: list[tuple[int, int]] = []
             for pid, fd_map in self.pid_fd_map.items():
@@ -249,7 +300,7 @@ class Monitor(Versioned):
 
     @changes
     def ignore_all(self):
-        """Adds all currently tracked file paths to the ignore list."""
+        """Adds all currently tracked file paths (bytes) to the ignore list."""
         log.info(f"Ignoring all currently tracked files for '{self.identifier}'")
         # Create list of paths to ignore *before* modifying the dict
         paths_to_ignore = [p for p in self.files.keys() if p not in STD_PATHS]
@@ -262,11 +313,11 @@ class Monitor(Versioned):
 
     @changes
     def open(
-        self, pid: int, path: str, fd: int, success: bool, timestamp: float, **details
+        self, pid: int, path: bytes, fd: int, success: bool, timestamp: float, **details
     ):
-        """Handles an 'open' or 'creat' event."""
+        """Handles an 'open' or 'creat' event with a bytes path."""
         log.debug(
-            f"Monitor.open: pid={pid}, path={path}, fd={fd}, success={success}, details={details}"
+            f"Monitor.open: pid={pid}, path={os.fsdecode(path)!r}, fd={fd}, success={success}, details={details}"
         )
         info = self._get_or_create_fileinfo(path, timestamp)
         if not info:
@@ -293,7 +344,7 @@ class Monitor(Versioned):
         elif success and fd < 0:
             # Log warning for successful open with invalid FD
             log.warning(
-                f"Successful open reported for path '{path}' but FD is invalid ({fd})"
+                f"Successful open reported for path '{os.fsdecode(path)!r}' but FD is invalid ({fd})"
             )
             if info.status != "deleted":
                 info.status = "error"  # Treat as error state
@@ -306,7 +357,8 @@ class Monitor(Versioned):
         )
 
         # Use the helper to remove the FD mapping and update FileInfo state
-        info = self._remove_fd(pid, fd)  # This handles map removal and status update
+        # _remove_fd now handles cases where path is None
+        info = self._remove_fd(pid, fd)
 
         if info:  # If FileInfo was found and updated by _remove_fd
             event_details = details.copy()
@@ -327,14 +379,14 @@ class Monitor(Versioned):
         self,
         pid: int,
         fd: int,
-        path: str | None,
+        path: bytes | None,
         success: bool,
         timestamp: float,
         **details,
     ):
-        """Handles a 'read' (or similar) event."""
+        """Handles a 'read' (or similar) event with bytes path."""
         log.debug(
-            f"Monitor.read: pid={pid}, fd={fd}, path={path}, success={success}, details={details}"
+            f"Monitor.read: pid={pid}, fd={fd}, path={os.fsdecode(path) if path else 'None'!r}, success={success}, details={details}"
         )
         # Try to resolve path from FD if not provided
         if path is None:
@@ -365,14 +417,14 @@ class Monitor(Versioned):
         self,
         pid: int,
         fd: int,
-        path: str | None,
+        path: bytes | None,
         success: bool,
         timestamp: float,
         **details,
     ):
-        """Handles a 'write' (or similar) event."""
+        """Handles a 'write' (or similar) event with bytes path."""
         log.debug(
-            f"Monitor.write: pid={pid}, fd={fd}, path={path}, success={success}, details={details}"
+            f"Monitor.write: pid={pid}, fd={fd}, path={os.fsdecode(path) if path else 'None'!r}, success={success}, details={details}"
         )
         # Try to resolve path from FD if not provided
         if path is None:
@@ -399,10 +451,10 @@ class Monitor(Versioned):
             info.status = "error"
 
     @changes
-    def stat(self, pid: int, path: str, success: bool, timestamp: float, **details):
-        """Handles a 'stat', 'access', 'lstat' etc. event."""
+    def stat(self, pid: int, path: bytes, success: bool, timestamp: float, **details):
+        """Handles a 'stat', 'access', 'lstat' etc. event with bytes path."""
         log.debug(
-            f"Monitor.stat: pid={pid}, path={path}, success={success}, details={details}"
+            f"Monitor.stat: pid={pid}, path={os.fsdecode(path)!r}, success={success}, details={details}"
         )
         info = self._get_or_create_fileinfo(path, timestamp)
         if not info:
@@ -420,15 +472,15 @@ class Monitor(Versioned):
             info.status = "error"
 
     @changes
-    def delete(self, pid: int, path: str, success: bool, timestamp: float, **details):
-        """Handles an 'unlink', 'rmdir' event."""
+    def delete(self, pid: int, path: bytes, success: bool, timestamp: float, **details):
+        """Handles an 'unlink', 'rmdir' event with bytes path."""
         log.debug(
-            f"Monitor.delete: pid={pid}, path={path}, success={success}, details={details}"
+            f"Monitor.delete: pid={pid}, path={os.fsdecode(path)!r}, success={success}, details={details}"
         )
         info = self.files.get(path)  # Check if path exists in our state
         if not info:
             # Log if delete event is for an untracked path
-            log.debug(f"Delete event for untracked path: {path}")
+            log.debug(f"Delete event for untracked path: {os.fsdecode(path)!r}")
             # Optionally create a temporary FileInfo to record the failed delete attempt?
             # For now, just return if not tracked.
             return
@@ -444,7 +496,7 @@ class Monitor(Versioned):
 
         # --- Successful Delete ---
         info.status = "deleted"
-        log.info(f"Path '{path}' marked as deleted.")
+        log.info(f"Path '{os.fsdecode(path)!r}' marked as deleted.")
 
         # Clean up associated state using the helper for each open FD
         pids_fds_to_remove: list[tuple[int, int]] = []
@@ -454,7 +506,7 @@ class Monitor(Versioned):
                 pids_fds_to_remove.append((open_pid, open_fd))
 
         log.debug(
-            f"Cleaning up {len(pids_fds_to_remove)} FD mappings for deleted path '{path}'."
+            f"Cleaning up {len(pids_fds_to_remove)} FD mappings for deleted path '{os.fsdecode(path)!r}'."
         )
         for remove_pid, remove_fd in pids_fds_to_remove:
             self._remove_fd(remove_pid, remove_fd)  # Use helper
@@ -466,15 +518,15 @@ class Monitor(Versioned):
     def rename(
         self,
         pid: int,
-        old_path: str,
-        new_path: str,
+        old_path: bytes,
+        new_path: bytes,
         success: bool,
         timestamp: float,
         **details,
     ):
-        """Handles a 'rename' event."""
+        """Handles a 'rename' event with bytes paths."""
         log.debug(
-            f"Monitor.rename: pid={pid}, old={old_path}, new={new_path}, success={success}, details={details}"
+            f"Monitor.rename: pid={pid}, old={os.fsdecode(old_path)!r}, new={os.fsdecode(new_path)!r}, success={success}, details={details}"
         )
 
         old_is_ignored = old_path in self.ignored_paths or old_path in STD_PATHS
@@ -482,7 +534,7 @@ class Monitor(Versioned):
 
         # --- Handle cases involving ignored paths ---
         if new_is_ignored:
-            log.info(f"Rename target path '{new_path}' is ignored.")
+            log.info(f"Rename target path '{os.fsdecode(new_path)!r}' is ignored.")
             # If successful rename *to* ignored, treat old path as deleted
             if success and not old_is_ignored and old_path in self.files:
                 self.delete(
@@ -492,7 +544,7 @@ class Monitor(Versioned):
             elif not success and not old_is_ignored and old_path in self.files:
                 info_old = self.files[old_path]
                 event_details = details.copy()
-                event_details["target_path"] = new_path
+                event_details["target_path"] = new_path  # Store bytes path
                 self._finalize_update(
                     info_old, "RENAME", success, timestamp, event_details
                 )
@@ -502,7 +554,7 @@ class Monitor(Versioned):
 
         if old_is_ignored:
             log.warning(
-                f"Rename source path '{old_path}' is ignored (event on PID {pid})."
+                f"Rename source path '{os.fsdecode(old_path)!r}' is ignored (event on PID {pid})."
             )
             # If successful rename *from* ignored, treat as stat/access on new path
             if success:
@@ -517,7 +569,7 @@ class Monitor(Versioned):
             info_old = self.files.get(old_path)
             if info_old:
                 event_details = details.copy()
-                event_details["target_path"] = new_path
+                event_details["target_path"] = new_path  # Store bytes path
                 self._finalize_update(
                     info_old, "RENAME", success, timestamp, event_details
                 )
@@ -527,7 +579,7 @@ class Monitor(Versioned):
             info_new = self._get_or_create_fileinfo(new_path, timestamp)
             if info_new:
                 event_details = details.copy()
-                event_details["source_path"] = old_path
+                event_details["source_path"] = old_path  # Store bytes path
                 self._finalize_update(
                     info_new, "RENAME_TARGET", success, timestamp, event_details
                 )
@@ -536,12 +588,14 @@ class Monitor(Versioned):
             return
 
         # --- Handle successful rename (neither path ignored) ---
-        log.info(f"Processing successful rename: '{old_path}' -> '{new_path}'")
+        log.info(
+            f"Processing successful rename: '{os.fsdecode(old_path)!r}' -> '{os.fsdecode(new_path)!r}'"
+        )
         old_info = self.files.get(old_path)
         if not old_info:
             # Source path wasn't tracked, just treat as access on new path
             log.debug(
-                f"Rename source path '{old_path}' not tracked. Treating as access to target '{new_path}'."
+                f"Rename source path '{os.fsdecode(old_path)!r}' not tracked. Treating as access to target '{os.fsdecode(new_path)!r}'."
             )
             self.stat(
                 pid, new_path, True, timestamp, {"renamed_from_unknown": old_path}
@@ -553,7 +607,7 @@ class Monitor(Versioned):
         if not new_info:
             # Should not happen if new_path isn't ignored, but handle defensively
             log.error(
-                f"Could not get/create FileInfo for rename target '{new_path}'. State may be inconsistent."
+                f"Could not get/create FileInfo for rename target '{os.fsdecode(new_path)!r}'. State may be inconsistent."
             )
             # Treat old path as deleted since rename succeeded but target state failed
             self.delete(
@@ -582,8 +636,8 @@ class Monitor(Versioned):
         # --- End State Transfer ---
 
         # Add RENAME event to history of *both* (before deleting old)
-        details_for_old = {"renamed_to": new_path}
-        details_for_new = {"renamed_from": old_path}
+        details_for_old = {"renamed_to": new_path}  # Store bytes path
+        details_for_new = {"renamed_from": old_path}  # Store bytes path
         self._add_event_to_history(
             old_info, "RENAME", success, timestamp, details_for_old
         )
@@ -601,13 +655,15 @@ class Monitor(Versioned):
                     pids_fds_to_update.append((map_pid, map_fd))
         if pids_fds_to_update:
             log.info(
-                f"Rename: Updating {len(pids_fds_to_update)} FD map entries: '{old_path}' -> '{new_path}'"
+                f"Rename: Updating {len(pids_fds_to_update)} FD map entries: '{os.fsdecode(old_path)!r}' -> '{os.fsdecode(new_path)!r}'"
             )
             for update_pid, update_fd in pids_fds_to_update:
                 self._update_pid_fd_map(update_pid, update_fd, new_path)
 
         # Remove old path state from the main files dictionary
-        log.debug(f"Removing old path state after successful rename: {old_path}")
+        log.debug(
+            f"Removing old path state after successful rename: {os.fsdecode(old_path)!r}"
+        )
         del self.files[old_path]
 
     @changes
@@ -656,14 +712,14 @@ class Monitor(Versioned):
         yield from list(self.files.values())
 
     @waits
-    def __getitem__(self, path: str) -> FileInfo:
+    def __getitem__(self, path: bytes) -> FileInfo:
         # Accessing item, protected by lock via @waits
         return self.files[path]
 
     @waits
-    def __contains__(self, path: str) -> bool:
+    def __contains__(self, path: bytes) -> bool:
         # Checking containment, protected by lock
-        return isinstance(path, str) and path in self.files
+        return isinstance(path, bytes) and path in self.files
 
     @waits
     def __len__(self) -> int:
@@ -671,12 +727,12 @@ class Monitor(Versioned):
         return len(self.files)
 
     @waits
-    def get_path(self, pid: int, fd: int) -> str | None:
-        """Retrieves the path for a PID/FD, handling standard streams."""
+    def get_path(self, pid: int, fd: int) -> bytes | None:
+        """Retrieves the bytes path for a PID/FD, handling standard streams."""
         path = self.pid_fd_map.get(pid, {}).get(fd)
         if path is not None:
             return path
-        # Handle standard streams if no mapping found
+        # Handle standard streams if no mapping found (return bytes)
         if fd == 0:
             return STDIN_PATH
         if fd == 1:

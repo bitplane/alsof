@@ -5,6 +5,21 @@ import logging
 import sys
 from collections import deque
 
+# --- Define TRACE level ---
+TRACE_LEVEL_NUM = 5
+logging.addLevelName(TRACE_LEVEL_NUM, "TRACE")
+
+
+def trace(self, message, *args, **kws):
+    # Yes, logger takes its '*args' as 'args'.
+    if self.isEnabledFor(TRACE_LEVEL_NUM):
+        self._log(TRACE_LEVEL_NUM, message, args, **kws)
+
+
+logging.Logger.trace = trace
+# --- End TRACE level definition ---
+
+
 # Global deque for log messages to be displayed in the UI
 # Needs to be accessible by the handler and the UI App instance
 LOG_QUEUE = deque(maxlen=1000)  # Max 1000 lines in memory
@@ -41,7 +56,12 @@ class TextualLogHandler(logging.Handler):
                 markup = f"{timestamp} [green]{plain_msg}[/green]"
             elif record.levelno >= logging.DEBUG:
                 markup = f"{timestamp} [dim]{plain_msg}[/dim]"
-            else:  # Default for lower levels
+            # --- Handle TRACE level ---
+            elif record.levelno >= TRACE_LEVEL_NUM:
+                # Make TRACE even dimmer or use a specific color if desired
+                markup = f"{timestamp} [dim white on grey11]{plain_msg}[/]"  # Example: very dim
+            # --------------------------
+            else:  # Default for lower levels (if any added below TRACE)
                 markup = f"{timestamp} {plain_msg}"
 
             # Append the marked-up string to the shared queue
@@ -53,7 +73,14 @@ class TextualLogHandler(logging.Handler):
 
 def setup_logging(level_name: str = "INFO"):
     """Configures the root logger to use the TextualLogHandler."""
-    log_level = getattr(logging, level_name.upper(), logging.INFO)
+    # --- Recognize TRACE level ---
+    level_name_upper = level_name.upper()
+    if level_name_upper == "TRACE":
+        log_level = TRACE_LEVEL_NUM
+    else:
+        log_level = getattr(logging, level_name_upper, logging.INFO)
+    # ---------------------------
+
     root_logger = logging.getLogger()  # Get the root logger
     root_logger.setLevel(log_level)
 
@@ -73,4 +100,6 @@ def setup_logging(level_name: str = "INFO"):
     # root_logger.addHandler(stream_handler)
 
     # Use the root logger to log the configuration message
-    logging.getLogger("lsoph").info(f"Logging configured at level {level_name}.")
+    logging.getLogger("lsoph").info(
+        f"Logging configured at level {logging.getLevelName(log_level)}."
+    )

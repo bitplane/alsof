@@ -30,41 +30,60 @@ def get_descendants(parent_pid: int) -> list[int]:
     return descendant_pids
 
 
-def get_cwd(pid: int) -> str | None:
+def get_cwd(pid: int) -> bytes | None:
     """
-    Retrieves the Current Working Directory (CWD) for a given PID.
+    Retrieves the Current Working Directory (CWD) for a given PID as bytes.
 
-    Uses psutil for cross-platform compatibility where possible, falling
-    back to /proc/<pid>/cwd on Linux if needed (though psutil usually handles this).
+    Uses psutil for cross-platform compatibility where possible, encodes the
+    result using os.fsencode(). Falls back to /proc/<pid>/cwd on Linux if needed,
+    which returns bytes directly.
 
     Args:
         pid: The Process ID.
 
     Returns:
-        The absolute path string of the CWD, or None if the process doesn't exist,
+        The absolute path bytes of the CWD, or None if the process doesn't exist,
         access is denied, or the CWD cannot be determined.
     """
     try:
         proc = psutil.Process(pid)
-        cwd = proc.cwd()
-        log.debug(f"Retrieved CWD for PID {pid}: {cwd}")
-        return cwd
+        cwd_str = proc.cwd()  # psutil returns str
+        # --- ENCODE TO BYTES ---
+        cwd_bytes = os.fsencode(cwd_str)
+        # -----------------------
+        log.debug(f"Retrieved CWD for PID {pid}: {cwd_str!r} -> {cwd_bytes!r}")
+        return cwd_bytes
     except psutil.NoSuchProcess:
         log.warning(f"Process with PID {pid} not found when getting CWD.")
         return None
     except psutil.AccessDenied:
-        log.warning(f"Access denied getting CWD for PID {pid}.")
+        log.warning(f"Access denied getting CWD for PID {pid} via psutil.")
         # Attempt Linux /proc fallback (might also fail with AccessDenied)
         try:
-            # Ensure pid is integer before path join
-            proc_path = f"/proc/{int(pid)}/cwd"
-            if os.path.exists(proc_path):  # Check existence before readlink
-                cwd = os.readlink(proc_path)
-                log.debug(f"Retrieved CWD via /proc for PID {pid}: {cwd}")
-                return cwd
-            else:
-                log.warning(f"/proc path {proc_path} not found.")
+            # --- USE BYTES PATH ---
+            proc_path = os.path.join(b"/proc", str(pid).encode("ascii"), b"cwd")
+            # --------------------
+            # Use os.stat on bytes path to check existence/permissions before readlink
+            try:
+                os.stat(proc_path)
+            except FileNotFoundError:
+                log.warning(f"/proc path {os.fsdecode(proc_path)!r} not found.")
                 return None
+            except PermissionError:
+                log.warning(
+                    f"Permission denied accessing /proc path {os.fsdecode(proc_path)!r}."
+                )
+                return None
+            except OSError as stat_err:
+                log.warning(
+                    f"Error stating /proc path {os.fsdecode(proc_path)!r}: {stat_err}"
+                )
+                return None
+
+            # If stat succeeded, try readlink
+            cwd_bytes = os.readlink(proc_path)  # readlink on bytes path returns bytes
+            log.debug(f"Retrieved CWD via /proc for PID {pid}: {cwd_bytes!r}")
+            return cwd_bytes
         except (OSError, PermissionError) as e:
             log.warning(f"Failed /proc fallback for CWD of PID {pid}: {e}")
             return None
@@ -114,9 +133,11 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.cwd:
-            cwd = get_cwd(args.pid)
-            if cwd:
-                print(cwd)
+            cwd_bytes = get_cwd(args.pid)
+            if cwd_bytes:
+                # Print bytes directly to stdout, let terminal handle display
+                sys.stdout.buffer.write(cwd_bytes + b"\n")
+                sys.stdout.buffer.flush()
             else:
                 print(f"Could not retrieve CWD for PID {args.pid}.", file=sys.stderr)
                 return 1

@@ -1,8 +1,9 @@
 # Filename: src/lsoph/ui/app.py
-"""Main Textual application class for lsoph."""
+"""Main Textual application class for lsoph. Handles bytes paths from Monitor."""
 
 import asyncio
 import logging
+import os  # For os.fsdecode
 import time
 from collections import deque
 from collections.abc import Callable, Coroutine
@@ -20,12 +21,14 @@ from textual.widgets import DataTable, Footer, Header, Static
 from textual.worker import Worker, WorkerState
 
 from lsoph.backend.base import Backend
-from lsoph.monitor import FileInfo, Monitor
+from lsoph.monitor import FileInfo, Monitor  # FileInfo path is bytes
+
+# short_path accepts bytes, returns str
 from lsoph.util.short_path import short_path
 
-from .detail_screen import DetailScreen
+from .detail_screen import DetailScreen  # DetailScreen needs to handle bytes path
 
-# Import the FileDataTable widget
+# Import the FileDataTable widget (now handles bytes paths internally)
 from .file_data_table import FileDataTable
 from .log_screen import LogScreen
 
@@ -63,7 +66,6 @@ class LsophApp(App[None]):
         Binding("ctrl+d", "dump_monitor", "Dump Monitor", show=False),
     ]
 
-    # REMEMBER: User renamed CSS file
     CSS_PATH = "style.css"
 
     # Reactive variables to trigger updates
@@ -102,7 +104,6 @@ class LsophApp(App[None]):
     def start_backend_worker(self):
         """Starts the background worker to run the backend's async method."""
         if self._backend_worker and self._backend_worker.state == WorkerState.RUNNING:
-            # log.warning("Backend worker already running.") # Reduce noise
             return
         worker_name = f"backend_{self.backend_instance.__class__.__name__}"
         log.info(f"Starting worker '{worker_name}' to run backend coroutine...")
@@ -165,14 +166,16 @@ class LsophApp(App[None]):
         if not self._file_table:
             return
         if new_version > old_version:
-            # log.debug(f"Monitor version changed ({old_version} -> {new_version}), calling table update.") # Reduced noise
-            all_files = list(self.monitor)
+            # Monitor.__iter__ yields FileInfo with bytes paths
+            all_files: list[FileInfo] = list(self.monitor)
             active_files = [
                 info
                 for info in all_files
+                # Compare bytes path with ignored bytes paths
                 if info.path not in self.monitor.ignored_paths
             ]
             active_files.sort(key=lambda info: info.last_activity_ts, reverse=True)
+            # FileDataTable.update_data accepts FileInfo list (with bytes paths)
             self._file_table.update_data(active_files)
             self.update_status(
                 f"Tracking {len(active_files)} files. Ignored: {len(self.monitor.ignored_paths)}. Monitor v{new_version}"
@@ -223,21 +226,13 @@ class LsophApp(App[None]):
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Handle row selection (Enter key) - show details."""
-        # Check if the event came from the main file table
         if event.control is self._file_table:
-            # log.debug(f"DataTable Row Selected (Enter) from main table: {event.row_key}") # Reduced noise
-            # Call the internal method directly, bypassing focus check
             self._show_detail_for_selected_row()
-        # else: log.debug("Ignoring row selection event from other source.")
 
     def on_data_table_row_activated(self, event: "DataTable.RowActivated") -> None:
         """Handle row activation (Double Click) - show details."""
-        # Check if the event came from the main file table
         if event.control is self._file_table:
-            # log.debug(f"DataTable Row Activated (Double Click) from main table: {event.row_key}") # Reduced noise
-            # Call the internal method directly, bypassing focus check
             self._show_detail_for_selected_row()
-        # else: log.debug("Ignoring row activation event from other source.")
 
     # --- Actions ---
 
@@ -251,10 +246,8 @@ class LsophApp(App[None]):
         """Checks if the file table exists and is focused."""
         if not self._file_table:
             return False
-        # Check if the table itself or one of its descendants has focus
-        # Also check if the main app screen is the current one
         if self.screen is not self:
-            return False  # Keep screen check here
+            return False
         if not self._file_table.has_focus and not self.focused_descendant_is_widget(
             self._file_table
         ):
@@ -262,34 +255,44 @@ class LsophApp(App[None]):
         return True
 
     def action_ignore_selected(self) -> None:
-        """Action to ignore the currently selected file path."""
+        """Action to ignore the currently selected file path (bytes)."""
         if not self._file_table:
-            return  # Ensure table exists
+            return
 
-        path_to_ignore = self._file_table.selected_path
-        if not path_to_ignore:
+        # FileDataTable.selected_path returns bytes
+        path_to_ignore_bytes = self._file_table.selected_path
+        if not path_to_ignore_bytes:
             self.notify("No row selected.", severity="warning", timeout=2)
             return
 
-        log.info(f"Ignoring selected path: {path_to_ignore}")
-        self.monitor.ignore(path_to_ignore)
+        # Decode for logging and notification
+        # --- FIX: Use os.fsdecode with one argument ---
+        path_to_ignore_str = os.fsdecode(path_to_ignore_bytes)
+        # ---------------------------------------------
+        log.info(f"Ignoring selected path: {path_to_ignore_str!r}")
+        # Call monitor.ignore with bytes path
+        self.monitor.ignore(path_to_ignore_bytes)
         # --- Force Update ---
         self.last_monitor_version = self.monitor.version
         # --- End Force Update ---
-        self.notify(f"Ignored: {short_path(path_to_ignore, 60)}", timeout=2)
+        self.notify(
+            f"Ignored: {short_path(path_to_ignore_bytes, 60)}", timeout=2
+        )  # short_path accepts bytes
 
     def action_ignore_all(self) -> None:
         """Action to ignore all currently tracked files."""
         if not self._file_table:
-            return  # Ensure table exists
+            return
 
         log.info("Ignoring all tracked files.")
+        # Get current active files (bytes paths) before ignoring
         count_before = len(
             [fi for fi in self.monitor if fi.path not in self.monitor.ignored_paths]
         )
         if count_before == 0:
             self.notify("No active files to ignore.", timeout=2)
             return
+        # monitor.ignore_all works internally with bytes paths
         self.monitor.ignore_all()
         # --- Force Update ---
         self.last_monitor_version = self.monitor.version
@@ -298,80 +301,103 @@ class LsophApp(App[None]):
 
     def action_show_log(self) -> None:
         """Action to show or hide the log screen."""
-        # This action is global, no screen check needed here
         is_log_screen_active = isinstance(self.screen, LogScreen)
         if is_log_screen_active:
             self.pop_screen()
         else:
             self.push_screen(LogScreen(self.log_queue))
 
-    # This action is bound to 'i' and requires focus check
     def action_show_detail(self) -> None:
         """Shows the detail screen for the selected row (requires focus check)."""
-        # Keep focus check for the 'i' key binding
         if not self._ensure_table_focused():
             return
         self._show_detail_for_selected_row()
 
-    # Internal method without focus check, called by event handlers and action_show_detail
     def _show_detail_for_selected_row(self) -> None:
-        """Core logic to show detail screen for the current selection."""
+        """Core logic to show detail screen for the current selection (bytes path)."""
         if not self._file_table:
-            return  # Should not happen if called correctly
-
-        path = self._file_table.selected_path
-        if not path:
-            # log.debug("_show_detail_for_selected_row called but no path selected.") # Reduced noise
             return
 
-        log.debug(f"Showing details for selected path: {path}")
+        # FileDataTable.selected_path returns bytes
+        path_bytes = self._file_table.selected_path
+        if not path_bytes:
+            return
+
+        # Decode for logging
+        # --- FIX: Use os.fsdecode with one argument ---
+        path_str = os.fsdecode(path_bytes)
+        # ---------------------------------------------
+        log.debug(f"Showing details for selected path: {path_str!r}")
         try:
-            file_info = self.monitor.files.get(path)
+            # Look up using bytes path key
+            file_info = self.monitor.files.get(path_bytes)
             if file_info:
+                # Pass FileInfo (with bytes path) to DetailScreen
                 self.push_screen(DetailScreen(file_info))
             else:
-                log.warning(f"File '{path}' not found in monitor state.")
+                log.warning(f"File '{path_str!r}' not found in monitor state.")
                 self.notify("File state not found.", severity="warning", timeout=3)
         except Exception as e:
-            log.exception(f"Error pushing DetailScreen for path: {path}")
+            log.exception(f"Error pushing DetailScreen for path: {path_str!r}")
             self.notify(f"Error showing details: {e}", severity="error")
 
     def action_scroll_home(self) -> None:
         """Scrolls the file table to the top."""
         if self._file_table:
-            # log.debug("Action: scroll_home") # Reduced noise
             self._file_table.scroll_home(animate=False)
             if self._file_table.row_count > 0:
-                self._file_table.move_cursor(row=0, animate=False)
+                try:
+                    self._file_table.move_cursor(row=0, animate=False)
+                except Exception as e:
+                    log.warning(f"Error moving cursor to top: {e}")
 
     def action_scroll_end(self) -> None:
         """Scrolls the file table to the bottom."""
         if self._file_table:
-            # log.debug("Action: scroll_end") # Reduced noise
             self._file_table.scroll_end(animate=False)
             if self._file_table.row_count > 0:
-                self._file_table.move_cursor(
-                    row=self._file_table.row_count - 1, animate=False
-                )
+                try:
+                    self._file_table.move_cursor(
+                        row=self._file_table.row_count - 1, animate=False
+                    )
+                except Exception as e:
+                    log.warning(f"Error moving cursor to bottom: {e}")
 
     def action_dump_monitor(self) -> None:
-        """Debug action to dump monitor state to log."""
+        """Debug action to dump monitor state to log (decodes paths)."""
         log.debug("--- Monitor State Dump ---")
         try:
             log.debug(f"Identifier: {self.monitor.identifier}")
             log.debug(f"Backend PID: {self.monitor.backend_pid}")
+            # Decode ignored paths for logging
+            # --- FIX: Use os.fsdecode with one argument ---
+            ignored_paths_str = {os.fsdecode(p) for p in self.monitor.ignored_paths}
+            # ---------------------------------------------
             log.debug(
-                f"Ignored Paths ({len(self.monitor.ignored_paths)}): {self.monitor.ignored_paths!r}"
+                f"Ignored Paths ({len(self.monitor.ignored_paths)}): {ignored_paths_str!r}"
             )
+            # Decode paths in pid_fd_map for logging
+            # --- FIX: Use os.fsdecode with one argument ---
+            pid_fd_map_str = {
+                pid: {fd: os.fsdecode(p) for fd, p in fds.items()}
+                for pid, fds in self.monitor.pid_fd_map.items()
+            }
+            # ---------------------------------------------
             log.debug(
-                f"PID->FD Map ({len(self.monitor.pid_fd_map)} pids): {self.monitor.pid_fd_map!r}"
+                f"PID->FD Map ({len(self.monitor.pid_fd_map)} pids): {pid_fd_map_str!r}"
             )
             log.debug(f"Files Dict ({len(self.monitor.files)} items):")
             # Use monitor's __iter__ for thread safety
-            sorted_files = sorted(list(self.monitor), key=lambda f: f.path)
+            # Decode path for logging
+            sorted_files = sorted(
+                list(self.monitor), key=lambda f: f.path
+            )  # Sort by bytes path
             for info in sorted_files:
+                # --- FIX: Use os.fsdecode with one argument ---
+                path_str = os.fsdecode(info.path)
+                # ---------------------------------------------
                 log.debug(
-                    f"  {info.path}: Status={info.status}, Open={info.is_open}, R/W={info.bytes_read}/{info.bytes_written}, Last={info.last_event_type}, PIDs={list(info.open_by_pids.keys())}"
+                    f"  {path_str!r}: Status={info.status}, Open={info.is_open}, R/W={info.bytes_read}/{info.bytes_written}, Last={info.last_event_type}, PIDs={list(info.open_by_pids.keys())}"
                 )
             log.debug("--- End Monitor State Dump ---")
             self.notify("Monitor state dumped to log (debug level).")

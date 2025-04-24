@@ -1,14 +1,17 @@
 # Filename: src/lsoph/backend/strace/parse.py
-"""Parsing logic for strace output."""
+"""Parsing logic for strace output. Operates on bytes lines using manual parsing."""
 
 import asyncio
 import logging
+import os  # For os.fsdecode
 import re
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, Optional  # Added Optional
+from typing import Any, List, Optional  # Added List
 
+# Import TRACE_LEVEL_NUM for logging
+from lsoph.log import TRACE_LEVEL_NUM
 from lsoph.monitor import Monitor
 
 # Import helpers here if needed by parsing logic itself, or keep in backend
@@ -18,68 +21,39 @@ log = logging.getLogger(__name__)
 
 # --- Constants ---
 # Syscalls indicating process creation/management
-PROCESS_SYSCALLS = ["clone", "fork", "vfork"]
+PROCESS_SYSCALLS = ["clone", "fork", "vfork"]  # Keep as strings for comparison
 # Syscalls indicating process termination
-EXIT_SYSCALLS = ["exit", "exit_group"]
+EXIT_SYSCALLS = ["exit", "exit_group"]  # Keep as strings for comparison
 # Syscalls indicating potential resumption after signal
-RESUME_SYSCALLS = ["rt_sigreturn", "sigreturn"]
+RESUME_SYSCALLS = ["rt_sigreturn", "sigreturn"]  # Keep as strings for comparison
 
-# --- Regular Expressions ---
-# Matches the start of a typical strace line: [pid NNNN] or NNNN
-PID_RE = re.compile(r"^(?:\[pid\s+)?(\d+)\)?")
-
-# Matches the timestamp at the start of the line (if present)
-TIMESTAMP_RE = re.compile(r"^\s*(\d+\.\d+)\s+")
-
-# Matches the core syscall part: syscall_name(arg1, arg2, ...) = result <...>
-# Updated to handle various argument formats and potential errors like ERESTARTSYS
-# Further updated to handle extraneous text after arguments (e.g., attach messages)
-SYSCALL_RE = re.compile(
-    r"""
-    ^                     # Start of the string (after PID/timestamp removal)
-    (?P<syscall>\w+)      # Syscall name (letters, numbers, underscore)
-    \(                    # Opening parenthesis for arguments
-    (?P<args>.*?)         # Arguments (non-greedy match) - will need further parsing
-    \)                    # Closing parenthesis
-    # --- Make the result part optional and handle potential extra text ---
-    (?:                   # Optional non-capturing group for the result part
-        \s*=\s* # Equals sign surrounded by optional whitespace
-        (?P<result_str>   # Start capturing result string
-            (?:           # Non-capturing group for hex, decimal, or '?'
-                -?\d+     # Optional negative sign, followed by digits (decimal)
-                |
-                0x[0-9a-fA-F]+ # Hexadecimal number
-                |
-                \?        # Question mark (for unfinished syscalls)
-            )
-            (?:           # Optional non-capturing group for error code/name
-                \s+
-                (?P<error_name>[A-Z][A-Z0-9_]+) # Error name (e.g., ENOENT)
-                \s*
-                \(
-                (?P<error_msg>.*?) # Error message (non-greedy)
-                \)
-            )?            # Error part is optional
-        )                 # End capturing result_str
-        (?:               # Optional non-capturing group for timing info
-            \s+
-            <(?P<timing>\d+\.\d+)>
-        )?                # Timing part is optional
-    )?                    # Make the entire = result ... part optional
-    .*?                   # Allow any characters non-greedily after args/result (like the attach message)
-    $                     # End of the string
+# --- Regular Expressions (Simple ones for prefixes/suffixes) ---
+PID_RE = re.compile(rb"^(?:\[pid\s+)?(\d+)\)?")  # bytes pattern
+TIMESTAMP_RE = re.compile(rb"^\s*(\d+\.\d+)\s+")  # bytes pattern
+UNFINISHED_RE = re.compile(rb"<unfinished \.\.\.>$")  # bytes pattern
+RESUMED_RE = re.compile(
+    rb"<\.\.\. (?P<syscall>[a-zA-Z0-9_]+) resumed> (.*)"
+)  # bytes pattern
+SIGNAL_RE = re.compile(rb"--- SIG(\w+) .* ---$")  # bytes pattern
+# Regex to parse the result part (used for resumed lines and fallback)
+RESULT_PART_RE = re.compile(
+    rb"""
+    .*?             # Allow anything before the result part (non-greedy)
+    \s*=\s* # Equals sign
+    (?P<result_str> # Result string (bytes)
+        (?:-?\d+|0x[0-9a-fA-F]+|\?) # decimal, hex, or ?
+    )
+    # Optional error part
+    (?:
+        \s+ (?P<error_name>[A-Z][A-Z0-9_]+) \s* \( (?P<error_msg>.*?) \)
+    )?
+    # Optional timing part
+    (?: \s+ <(?P<timing>\d+\.\d+)> )?
+    \s* # Allow trailing whitespace
+    $               # Anchor to end
     """,
     re.VERBOSE,
 )
-
-# Matches lines indicating syscall was unfinished
-UNFINISHED_RE = re.compile(r"<unfinished \.\.\.>$")
-
-# Matches lines indicating syscall resumption
-RESUMED_RE = re.compile(r"<\.\.\. (?P<syscall>\w+) resumed> (.*)")
-
-# Matches signal delivery lines
-SIGNAL_RE = re.compile(r"--- SIG(\w+) .* ---$")
 
 
 # --- Dataclass for Parsed Syscall ---
@@ -88,219 +62,408 @@ class Syscall:
     """Represents a parsed strace syscall event."""
 
     pid: int
-    syscall: str
-    args: list[str] = field(default_factory=list)
-    result_str: str | None = None
-    result_int: int | None = None  # Store parsed integer result
-    child_pid: int | None = None  # Store child PID for clone/fork/vfork
-    error_name: str | None = None
-    error_msg: str | None = None
+    syscall: str  # Syscall name is decoded to str
+    # --- ARGS ARE NOW BYTES ---
+    args: List[bytes] = field(default_factory=list)
+    # -------------------------
+    result_str: str | None = None  # Result string is decoded
+    result_int: int | None = None
+    child_pid: int | None = None
+    error_name: str | None = None  # Error name is decoded
+    error_msg: str | None = None  # Error message is decoded
     timing: float | None = None
-    timestamp: float = field(default_factory=time.time)  # Timestamp when processed
-    raw_line: str = ""  # Store original line for debugging
+    timestamp: float = field(default_factory=time.time)
+    # --- RAW_LINE IS NOW BYTES ---
+    raw_line: bytes = b""
+    # ---------------------------
 
     @property
     def success(self) -> bool:
         """Determine if the syscall was successful (no error reported)."""
-        # Consider a syscall successful if there's no error name
-        # AND the result is not typically an error indicator like -1 (unless result is None or ?)
-        # This is a heuristic.
         if self.error_name:
             return False
-        if self.result_int is not None and self.result_int < 0:
-            # Common pattern for errors when error_name isn't parsed (e.g., older strace)
+        # Consider result_int < 0 as failure only if error_name is not set
+        # (covers cases where strace doesn't explicitly print the error name)
+        if self.result_int is not None and self.result_int < 0 and not self.error_name:
             return False
-        # Treat cases with no result or '?' as potentially successful or indeterminate
-        return True
+        return True  # Assume success otherwise (including result=None or ?)
 
     def __repr__(self) -> str:
         # Provide a more concise representation for logging
         err_part = f" ERR={self.error_name}" if self.error_name else ""
         child_part = f" CHILD={self.child_pid}" if self.child_pid else ""
-        return f"Syscall(pid={self.pid}, ts={self.timestamp:.3f}, call={self.syscall}(...), ret={self.result_str}{err_part}{child_part})"
+        # Decode args for repr only, limit length
+        args_repr_list = []
+        for i, a in enumerate(self.args):
+            if i >= 2:  # Show max 2 args in repr
+                args_repr_list.append("...")
+                break
+            try:
+                # Use fsdecode for potentially non-utf8 bytes in args
+                args_repr_list.append(os.fsdecode(a))
+            except Exception:
+                args_repr_list.append(repr(a))  # Show raw bytes if decode fails
+        args_repr = ", ".join(args_repr_list)
+
+        return f"Syscall(pid={self.pid}, ts={self.timestamp:.3f}, call={self.syscall}({args_repr}), ret={self.result_str}{err_part}{child_part})"
 
 
 # --- Parsing Functions ---
 
 
-def _parse_args_simple(args_str: str) -> list[str]:
+def _parse_args_bytes(args_bytes: bytes) -> List[bytes]:
     """
-    A simple argument parser. Handles basic quoted strings and commas.
-    Limitations: Doesn't handle nested structures or complex escapes perfectly.
+    Parses the raw bytes arguments string from strace.
+    Handles basic quoted strings (b'"') and commas (b',') within bytes.
+    Handles escaped quotes (b'\\"').
     """
+    # Using the more robust quote/escape handling version
     args = []
-    current_arg = ""
+    current_arg = bytearray()
     in_quotes = False
     escape_next = False
     # Add a dummy comma at the end to help flush the last argument
-    args_str += ","
+    args_bytes += b","
 
-    for char in args_str:
+    i = 0
+    n = len(args_bytes)
+    while i < n:
+        byte_val = args_bytes[i : i + 1]  # Get the current byte as bytes
+
         if escape_next:
-            current_arg += char
+            # If previous was escape, append current byte literally
+            current_arg.extend(byte_val)
             escape_next = False
-        elif char == "\\":
+            i += 1
+        elif byte_val == b"\\":
+            # Found an escape character, mark it and append
             escape_next = True
-            current_arg += char  # Keep the backslash for now
-        elif char == '"':
+            current_arg.extend(byte_val)  # Keep the backslash byte for now
+            i += 1
+        elif byte_val == b'"':
+            # Toggle quote state, append the quote
             in_quotes = not in_quotes
-            current_arg += char
-        elif char == "," and not in_quotes:
-            # Argument finished
-            args.append(current_arg.strip())
-            current_arg = ""
+            current_arg.extend(byte_val)
+            i += 1
+        elif byte_val == b"," and not in_quotes:
+            # Argument finished (if not inside quotes)
+            stripped_arg = bytes(current_arg).strip()  # Strip whitespace bytes
+            if stripped_arg:  # Only add non-empty args
+                args.append(stripped_arg)
+            current_arg = bytearray()  # Reset for next arg
+            i += 1
         else:
-            current_arg += char
+            # Regular byte, append it
+            current_arg.extend(byte_val)
+            i += 1
 
-    # The dummy comma ensures the last argument is processed,
-    # but might leave an empty string if the original string ended with a comma.
-    # We filter out empty strings that might result from trailing commas or empty args.
-    return [arg for arg in args if arg]
+    # Return list of bytes arguments
+    return args
+
+
+def _parse_result_part(result_part_bytes: bytes) -> dict:
+    """Parses the ' = result [error] [<timing>]' part of a line."""
+    result_data = {
+        "result_str": None,
+        "error_name": None,
+        "error_msg": None,
+        "timing": None,
+    }
+    # Find the equals sign
+    eq_pos = result_part_bytes.find(b"=")
+    if eq_pos == -1:
+        log.debug(f"Could not find '=' in result part: {result_part_bytes!r}")
+        return result_data  # No result found
+
+    # Extract potential result string (strip whitespace)
+    potential_result = result_part_bytes[eq_pos + 1 :].lstrip()
+
+    # Find the end of the numeric/hex result or '?'
+    res_end_pos = 0
+    current_byte = potential_result[0:1] if potential_result else b""
+    if (
+        current_byte == b"-"
+        and len(potential_result) > 1
+        and potential_result[1:2].isdigit()
+    ):
+        res_end_pos = 1  # Skip leading '-'
+        while (
+            res_end_pos < len(potential_result)
+            and potential_result[res_end_pos : res_end_pos + 1].isdigit()
+        ):
+            res_end_pos += 1
+    elif (
+        current_byte == b"0"
+        and len(potential_result) > 1
+        and potential_result[1:2] in b"xX"
+    ):
+        res_end_pos = 2  # Skip leading '0x'
+        while (
+            res_end_pos < len(potential_result)
+            and potential_result[res_end_pos : res_end_pos + 1]
+            in b"0123456789abcdefABCDEF"
+        ):
+            res_end_pos += 1
+    elif current_byte.isdigit():
+        while (
+            res_end_pos < len(potential_result)
+            and potential_result[res_end_pos : res_end_pos + 1].isdigit()
+        ):
+            res_end_pos += 1
+    elif current_byte == b"?":
+        res_end_pos = 1
+
+    if res_end_pos > 0:
+        result_str_bytes = potential_result[:res_end_pos]
+        result_data["result_str"] = result_str_bytes.decode("utf-8", "surrogateescape")
+        remainder = potential_result[res_end_pos:].lstrip()
+    else:
+        log.debug(f"Could not parse numeric/hex/? result from: {potential_result!r}")
+        remainder = potential_result  # Process remainder for error/timing
+
+    # Look for error (e.g., " ENOENT (No such file...)")
+    err_match = re.match(rb"\s*([A-Z][A-Z0-9_]+)\s*\((.*?)\)", remainder)
+    if err_match:
+        result_data["error_name"] = err_match.group(1).decode("ascii")
+        result_data["error_msg"] = err_match.group(2).decode("utf-8", "surrogateescape")
+        # Advance remainder past the error message
+        remainder = remainder[err_match.end() :].lstrip()
+
+    # Look for timing (e.g., " <0.000123>")
+    time_match = re.search(rb"<(\d+\.\d+)>", remainder)
+    if time_match:
+        try:
+            result_data["timing"] = float(time_match.group(1))
+        except ValueError:
+            pass  # Ignore float conversion errors
+
+    return result_data
 
 
 def _parse_strace_line(
-    line: str, unfinished_syscalls: dict[int, str], current_time: float
+    line_bytes: bytes,  # Accepts raw bytes line
+    unfinished_syscalls: dict[int, str],  # Syscall name is still str
+    current_time: float,
 ) -> Syscall | None:
     """
-    Parses a single line of strace output. Handles PID, timestamp, syscall,
-    unfinished/resumed lines, and signals. Extracts child PID for clone/fork/vfork.
+    Parses a single raw bytes line of strace output using manual parsing.
+    Handles PID, timestamp, syscall, args (bytes), result, unfinished/resumed, signals.
     """
-    original_line = line
+    original_line_bytes = line_bytes
     pid: int | None = None
     timestamp: float | None = None
 
     # 1. Extract PID
-    pid_match = PID_RE.match(line)
+    pid_match = PID_RE.match(line_bytes)
     if pid_match:
-        pid = int(pid_match.group(1))
-        line = line[pid_match.end() :].lstrip()
+        try:
+            pid = int(pid_match.group(1))
+        except ValueError:
+            log.warning(f"Could not parse PID digits from: {pid_match.group(1)!r}")
+            return None
+        line_bytes = line_bytes[pid_match.end() :].lstrip()
     else:
-        signal_match = SIGNAL_RE.match(line)
-        if signal_match:
-            return None  # Ignore signal lines
-        # log.debug(f"Could not extract PID from line: {original_line}") # Reduce noise
+        # Ignore signals or lines without PID
+        if (
+            not SIGNAL_RE.match(original_line_bytes)
+            and not original_line_bytes.startswith(b"+++ exited")
+            and not original_line_bytes.startswith(b"+++ killed")
+        ):
+            log.debug(f"Could not extract PID from line: {original_line_bytes!r}")
         return None
 
-    # 2. Extract Timestamp (optional)
-    ts_match = TIMESTAMP_RE.match(line)
+    # 2. Extract Timestamp
+    ts_match = TIMESTAMP_RE.match(line_bytes)
     if ts_match:
         try:
             timestamp = float(ts_match.group(1))
         except ValueError:
-            pass  # Ignore timestamp parse errors
-        line = line[ts_match.end() :].lstrip()
-
+            pass
+        line_bytes = line_bytes[ts_match.end() :].lstrip()
     event_timestamp = timestamp if timestamp is not None else current_time
 
-    # 3. Handle Unfinished/Resumed/Signal lines
-    unfinished_match = UNFINISHED_RE.search(line)
+    # 3. Handle special line types (unfinished, resumed, signal)
+    unfinished_match = UNFINISHED_RE.search(line_bytes)
     if unfinished_match:
-        syscall_part = line[: unfinished_match.start()].strip()
-        syscall_name = syscall_part.split("(", 1)[0]
-        if syscall_name:  # Only store if we got a name
-            unfinished_syscalls[pid] = syscall_name
-            # log.debug(f"Stored unfinished syscall for PID {pid}: {syscall_name}") # Reduce noise
-        return None
+        syscall_part_bytes = line_bytes[: unfinished_match.start()].strip()
+        syscall_name_bytes = syscall_part_bytes.split(b"(", 1)[0]
+        try:
+            syscall_name_str = syscall_name_bytes.decode("ascii")
+            unfinished_syscalls[pid] = syscall_name_str
+        except UnicodeDecodeError:
+            log.warning(
+                f"Could not decode unfinished syscall name: {syscall_name_bytes!r}"
+            )
+        return None  # Don't yield unfinished events
 
-    resumed_match = RESUMED_RE.match(line)
+    resumed_match = RESUMED_RE.match(line_bytes)
     if resumed_match:
-        syscall_name = resumed_match.group("syscall")
-        if unfinished_syscalls.get(pid) == syscall_name:
-            # log.debug(f"Matched resumed syscall for PID {pid}: {syscall_name}") # Reduce noise
-            del unfinished_syscalls[pid]
-            line = resumed_match.group(2).strip()  # Process the rest of the line
-        else:
-            # log.warning(f"Resumed syscall '{syscall_name}' for PID {pid} without matching unfinished call. Stored: {unfinished_syscalls.get(pid)}") # Reduce noise
-            return None  # Discard mismatched resumption
+        try:
+            syscall_name_str = resumed_match.group("syscall").decode("ascii")
+            if unfinished_syscalls.get(pid) == syscall_name_str:
+                del unfinished_syscalls[pid]
+                remainder_bytes = resumed_match.group(2).strip()
+                # Parse result from the remainder
+                result_data = _parse_result_part(remainder_bytes)
+                result_int = helpers.parse_result_int(result_data["result_str"])
 
-    signal_match = SIGNAL_RE.match(line)
-    if signal_match:
-        if pid in unfinished_syscalls:
-            # log.debug(f"Clearing unfinished syscall for PID {pid} due to signal delivery.") # Reduce noise
-            del unfinished_syscalls[pid]
+                return Syscall(
+                    pid=pid,
+                    syscall=syscall_name_str,
+                    args=[],  # No args on resumed line
+                    result_str=result_data["result_str"],
+                    result_int=result_int,
+                    child_pid=None,  # Cannot determine from resumed line
+                    error_name=result_data["error_name"],
+                    error_msg=result_data["error_msg"],
+                    timing=result_data["timing"],
+                    timestamp=event_timestamp,
+                    raw_line=original_line_bytes,
+                )
+            else:
+                log.warning(
+                    f"Resumed syscall '{syscall_name_str}' for PID {pid} without matching unfinished call. Stored: {unfinished_syscalls.get(pid)}"
+                )
+                return None
+        except UnicodeDecodeError:
+            log.warning(
+                f"Could not decode resumed syscall name: {resumed_match.group('syscall')!r}"
+            )
+            return None
+
+    # If it's not unfinished or resumed, treat as a regular line attempt
+    # 4. Find syscall name, arguments, and result part manually
+    syscall_name_str: str | None = None
+    args_bytes_list: List[bytes] = []
+    result_data = {}
+
+    try:
+        open_paren_pos = line_bytes.find(b"(")
+        if open_paren_pos != -1:
+            syscall_name_bytes = line_bytes[:open_paren_pos]
+            syscall_name_str = syscall_name_bytes.decode("ascii")
+
+            # Find matching closing parenthesis (handle potential nesting - basic)
+            close_paren_pos = -1
+            paren_level = 0
+            in_str_quote = False
+            esc = False
+            for i in range(open_paren_pos + 1, len(line_bytes)):
+                char = line_bytes[i : i + 1]
+                if esc:
+                    esc = False
+                elif char == b"\\":
+                    esc = True
+                elif char == b'"':
+                    in_str_quote = not in_str_quote
+                elif char == b"(" and not in_str_quote:
+                    paren_level += 1
+                elif char == b")" and not in_str_quote:
+                    if paren_level == 0:
+                        close_paren_pos = i
+                        break
+                    paren_level -= 1
+
+            if close_paren_pos != -1:
+                args_raw_bytes = line_bytes[open_paren_pos + 1 : close_paren_pos]
+                args_bytes_list = _parse_args_bytes(args_raw_bytes)
+
+                # Look for result part after the closing parenthesis
+                result_part_bytes = line_bytes[close_paren_pos + 1 :]
+                result_data = _parse_result_part(result_part_bytes)
+            else:
+                log.debug(
+                    f"Could not find matching ')' for syscall line: {original_line_bytes!r}"
+                )
+                return None  # Malformed line
+        else:
+            log.debug(f"Could not find '(' for syscall line: {original_line_bytes!r}")
+            return None  # Malformed line
+
+    except UnicodeDecodeError:
+        log.warning(f"Could not decode syscall name: {line_bytes[:open_paren_pos]!r}")
+        return None
+    except Exception as e:
+        log.exception(
+            f"Error during manual parsing of line {original_line_bytes!r}: {e}"
+        )
         return None
 
-    # 4. Parse the core syscall structure
-    syscall_match = SYSCALL_RE.match(line)
-    if syscall_match:
-        data = syscall_match.groupdict()
-        syscall_name = data["syscall"]
-
-        args_list = _parse_args_simple(data.get("args", "") or "")
-
-        result_str = data.get("result_str")
-        error_name = data.get("error_name")
-        error_msg = data.get("error_msg")
-        timing_str = data.get("timing")
-        timing = float(timing_str) if timing_str else None
-
-        # Parse integer result and potential child PID
-        result_int: Optional[int] = None
-        child_pid: Optional[int] = None
-        if result_str:
-            result_int = helpers.parse_result_int(result_str)
-            # If clone/fork/vfork succeeded (no error, result >= 0), result is child PID
-            if (
-                syscall_name in PROCESS_SYSCALLS
-                and not error_name
-                and result_int is not None
-                and result_int >= 0
-            ):
-                child_pid = result_int
+    # Construct the Syscall object if syscall name was found
+    if syscall_name_str:
+        result_int = helpers.parse_result_int(result_data["result_str"])
+        child_pid = None
+        if (
+            syscall_name_str in PROCESS_SYSCALLS
+            and not result_data["error_name"]
+            and result_int is not None
+            and result_int >= 0
+        ):
+            child_pid = result_int
 
         # Clear unfinished state if this syscall matches the one stored
-        if unfinished_syscalls.get(pid) == syscall_name:
-            # log.debug(f"Implicitly clearing unfinished {syscall_name} for PID {pid}") # Reduce noise
+        if unfinished_syscalls.get(pid) == syscall_name_str:
             del unfinished_syscalls[pid]
 
         return Syscall(
             pid=pid,
-            syscall=syscall_name,
-            args=args_list,
-            result_str=result_str,
-            result_int=result_int,  # Store parsed int result
-            child_pid=child_pid,  # Store parsed child PID
-            error_name=error_name,
-            error_msg=error_msg,
-            timing=timing,
+            syscall=syscall_name_str,
+            args=args_bytes_list,
+            result_str=result_data["result_str"],
+            result_int=result_int,
+            child_pid=child_pid,
+            error_name=result_data["error_name"],
+            error_msg=result_data["error_msg"],
+            timing=result_data["timing"],
             timestamp=event_timestamp,
-            raw_line=original_line,
+            raw_line=original_line_bytes,
         )
     else:
-        # Reduce noise for common ignored lines
-        # if "resumed" in line: pass
-        # elif line.startswith("+++ exited with") or line.startswith("+++ killed by"): pass
-        # else: log.warning(f"Failed to parse syscall line structure for PID {pid}: {original_line}")
+        # Should not happen if parsing logic is correct, but log just in case
+        log.debug(
+            f"Manual parsing failed to extract syscall name from: {original_line_bytes!r}"
+        )
         return None
 
 
 # --- Async Stream Parser ---
 async def parse_strace_stream(
-    lines: AsyncIterator[str],
+    lines_bytes: AsyncIterator[bytes],  # Accepts bytes lines
     monitor: Monitor,
     stop_event: asyncio.Event,
-    syscalls: list[str] | None = None,
+    syscalls: list[str] | None = None,  # List of syscall names (strings)
     attach_ids: list[int] | None = None,
 ) -> AsyncIterator[Syscall]:
     """
-    Asynchronously parses a stream of raw strace output lines into Syscall objects.
+    Asynchronously parses a stream of raw strace output bytes lines into Syscall objects.
     """
-    # log.info("Starting strace stream parser...") # Reduce noise
     unfinished_syscalls: dict[int, str] = {}
     line_count = 0
     parsed_count = 0
-
+    # --- Check if TRACE level is enabled once at the start ---
+    trace_enabled = log.isEnabledFor(TRACE_LEVEL_NUM)
+    # -------------------------------------------------------
     try:
-        async for line in lines:
+        async for line_b in lines_bytes:  # Iterate over bytes lines
             line_count += 1
             if stop_event.is_set():
                 break
 
+            # --- Log raw line if TRACE is enabled ---
+            if trace_enabled:
+                log.log(TRACE_LEVEL_NUM, f"Raw strace line: {line_b!r}")
+            # ----------------------------------------
+
             current_time = time.time()
-            parsed_event = _parse_strace_line(line, unfinished_syscalls, current_time)
+            # Pass raw bytes line to parser
+            parsed_event = _parse_strace_line(line_b, unfinished_syscalls, current_time)
 
             if parsed_event:
+                # Compare decoded syscall name with the filter list
                 if syscalls is None or parsed_event.syscall in syscalls:
+                    # --- ADDED: Debug log for parsed event ---
+                    log.debug(f"Parsed event: {parsed_event!r}")
+                    # -----------------------------------------
                     parsed_count += 1
                     yield parsed_event
             # Prevent tight loop on fast/empty streams
@@ -308,8 +471,6 @@ async def parse_strace_stream(
 
     except asyncio.CancelledError:
         log.info("Strace stream parsing task cancelled.")
-    # Let other exceptions propagate (like UnicodeDecodeError)
-    # except Exception as e: log.exception(f"Error during strace stream parsing: {e}")
     finally:
         log.info(
             f"Exiting strace stream parser. Processed {line_count} lines, yielded {parsed_count} events."

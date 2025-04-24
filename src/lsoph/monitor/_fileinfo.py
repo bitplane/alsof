@@ -1,6 +1,7 @@
 # Filename: src/lsoph/monitor/_fileinfo.py
 """
 Dataclass definition for storing information about a single tracked file.
+Path is stored as bytes.
 """
 
 import time
@@ -19,7 +20,9 @@ DEFAULT_RECENT_EVENT_TYPES_SIZE = 5
 class FileInfo:
     """Holds state information about a single tracked file."""
 
-    path: str
+    # --- PATH IS NOW BYTES ---
+    path: bytes
+    # ------------------------
     status: str = "unknown"  # e.g., unknown, open, closed, active, deleted, error
     last_activity_ts: float = field(default_factory=time.time)
     # Maps PID -> set of open FDs for that PID

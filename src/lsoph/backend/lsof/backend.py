@@ -1,8 +1,9 @@
 # Filename: src/lsoph/backend/lsof/backend.py
-"""Lsof backend implementation using polling and descendant tracking."""
+"""Lsof backend implementation using polling and descendant tracking. Works with bytes paths."""
 
 import asyncio
 import logging
+import os  # For os.fsdecode
 import shutil  # Import shutil for which()
 import time
 from typing import Any  # Keep Any if needed, though maybe not directly here
@@ -16,6 +17,7 @@ from lsoph.util.pid import get_descendants
 from ..base import Backend
 
 # Import helper functions from sibling module
+# _perform_lsof_poll_async now works with bytes paths
 from .helpers import _perform_lsof_poll_async
 
 log = logging.getLogger(__name__)  # Use specific logger
@@ -33,7 +35,7 @@ class Lsof(Backend):  # Renamed from LsofBackend
 
     Monitors specified initial PIDs and automatically discovers and monitors
     their descendants over time. Detects file open/close events by comparing
-    lsof output between poll cycles.
+    lsof output between poll cycles. Uses bytes paths internally.
     """
 
     # Class attribute for the command-line name
@@ -79,7 +81,7 @@ class Lsof(Backend):  # Renamed from LsofBackend
 
         This method runs a continuous loop, polling with `lsof`, updating the
         monitor state, and periodically checking for new child processes of the
-        initial PIDs.
+        initial PIDs. Uses bytes paths for state.
 
         Args:
             pids: A list of initial process IDs to monitor.
@@ -102,12 +104,14 @@ class Lsof(Backend):  # Renamed from LsofBackend
             f"Starting {self.__class__.__name__} attach monitoring loop. Initial PIDs: {initial_pids}"  # Use class name
         )
 
-        # --- State for the attach loop ---
+        # --- State for the attach loop (using bytes paths) ---
         # Set of all PIDs currently being monitored (initial + discovered descendants)
         monitored_pids: set[int] = set(initial_pids)
-        # State of FDs seen in the last successful poll {pid: {(fd, path), ...}}
+        # State of FDs seen in the last successful poll {pid: {(fd, path_bytes), ...}}
         # Used to detect file closures between polls.
-        seen_fds: dict[int, set[tuple[int, str]]] = {}
+        # --- SEEN_FDS NOW STORES BYTES PATHS ---
+        seen_fds: dict[int, set[tuple[int, bytes]]] = {}
+        # ----------------------------------------
         # Counter for triggering periodic child checks
         poll_count: int = 0
         # --- End State ---
@@ -165,10 +169,11 @@ class Lsof(Backend):  # Renamed from LsofBackend
                     # No PIDs to poll, just wait for the next cycle/descendant check
                 else:
                     # Call the helper function to run lsof and process results
+                    # _perform_lsof_poll_async now works with bytes paths
                     current_fds, pids_seen = await _perform_lsof_poll_async(
                         pids_to_poll, self.monitor, seen_fds
                     )
-                    # Update the state for the *next* poll's comparison
+                    # Update the state (bytes paths) for the *next* poll's comparison
                     seen_fds = current_fds
 
                     # --- Clean up state for PIDs that disappeared ---

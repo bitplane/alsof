@@ -1,5 +1,5 @@
 # Filename: src/lsoph/backend/psutil/helpers.py
-"""Helper functions for the psutil backend."""
+"""Helper functions for the psutil backend. Works with bytes paths."""
 
 import logging
 import os
@@ -30,12 +30,17 @@ def _get_process_info(pid: int) -> psutil.Process | None:
         return None
 
 
-def _get_process_cwd(proc: psutil.Process) -> str | None:
-    """Safely get the current working directory."""
+def _get_process_cwd(proc: psutil.Process) -> bytes | None:
+    """Safely get the current working directory as bytes."""
     if not PSUTIL_AVAILABLE:
         return None  # Guard clause
     try:
-        return proc.cwd()
+        cwd_str = proc.cwd()  # psutil returns str
+        # --- ENCODE TO BYTES ---
+        cwd_bytes = os.fsencode(cwd_str)
+        # -----------------------
+        log.debug(f"Retrieved CWD for PID {proc.pid}: {cwd_str!r} -> {cwd_bytes!r}")
+        return cwd_bytes
     except (
         psutil.NoSuchProcess,
         psutil.AccessDenied,
@@ -48,8 +53,11 @@ def _get_process_cwd(proc: psutil.Process) -> str | None:
 
 def _get_process_open_files(
     proc: psutil.Process,
-) -> list[dict[str, Any]]:  # Use list and dict
-    """Safely get open files and connections for a process."""
+) -> list[dict[str, Any]]:  # Dict value for 'path' will be bytes
+    """
+    Safely get open files and connections for a process.
+    Returns paths as bytes.
+    """
     if not PSUTIL_AVAILABLE:
         return []  # Guard clause
 
@@ -57,11 +65,26 @@ def _get_process_open_files(
     pid = proc.pid
     try:  # Get regular files
         for f in proc.open_files():
-            # Ensure path is a string, handle potential issues
-            path = str(f.path) if hasattr(f, "path") and f.path else f"<FD:{f.fd}>"
+            # Ensure path is bytes, handle potential issues
+            path_bytes: bytes | None = None
+            if hasattr(f, "path") and f.path:
+                try:
+                    # --- ENCODE TO BYTES ---
+                    path_bytes = os.fsencode(str(f.path))
+                    # -----------------------
+                except Exception as enc_err:
+                    log.warning(
+                        f"Could not encode path '{f.path}' for PID {pid} FD {f.fd}: {enc_err}"
+                    )
+                    # Fallback to a placeholder bytes string
+                    path_bytes = os.fsencode(f"<UNENCODABLE_PATH_FD:{f.fd}>")
+            else:
+                # Use bytes placeholder if no path attribute
+                path_bytes = os.fsencode(f"<NO_PATH_FD:{f.fd}>")
+
             open_files_data.append(
                 {
-                    "path": path,
+                    "path": path_bytes,  # Store bytes path
                     "fd": f.fd,
                     "mode": getattr(f, "mode", ""),  # Use getattr for safety
                     "type": "file",
@@ -78,7 +101,7 @@ def _get_process_open_files(
     try:  # Get connections
         for conn in proc.connections(kind="all"):
             try:
-                # Simplify connection string representation
+                # Simplify connection string representation (keep as string for now)
                 if conn.laddr:
                     laddr_str = f"{conn.laddr.ip}:{conn.laddr.port}"
                 else:
@@ -96,16 +119,21 @@ def _get_process_open_files(
                     conn.type.name if hasattr(conn.type, "name") else str(conn.type)
                 )
 
+                # Format path string based on connection type/status
                 if conn.status == psutil.CONN_ESTABLISHED and raddr_str:
-                    path = f"<SOCKET:{conn_type_str}:{laddr_str}->{raddr_str}>"
+                    path_str = f"<SOCKET:{conn_type_str}:{laddr_str}->{raddr_str}>"
                 elif conn.status == psutil.CONN_LISTEN:
-                    path = f"<SOCKET_LISTEN:{conn_type_str}:{laddr_str}>"
+                    path_str = f"<SOCKET_LISTEN:{conn_type_str}:{laddr_str}>"
                 else:
-                    path = f"<SOCKET:{conn_type_str}:{laddr_str} fd={conn.fd} status={conn.status}>"
+                    path_str = f"<SOCKET:{conn_type_str}:{laddr_str} fd={conn.fd} status={conn.status}>"
+
+                # --- ENCODE TO BYTES ---
+                path_bytes = os.fsencode(path_str)
+                # -----------------------
 
                 open_files_data.append(
                     {
-                        "path": path,
+                        "path": path_bytes,  # Store bytes path
                         "fd": conn.fd if conn.fd != -1 else -1,  # Use -1 for invalid FD
                         "mode": "rw",  # Assume read/write for sockets
                         "type": "socket",

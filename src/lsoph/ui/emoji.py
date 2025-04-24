@@ -4,7 +4,7 @@
 import logging
 from typing import Any
 
-from lsoph.monitor import FileInfo
+from lsoph.monitor import FileInfo  # FileInfo.path is bytes
 
 log = logging.getLogger("lsoph.ui.emoji")
 
@@ -15,7 +15,9 @@ EVENT_EMOJI_MAP = {
     "OPEN": "📂",  # File Folder (Represents opening)
     "READ": "📖",  # Open Book (Represents reading)
     "WRITE": "💾",  # Floppy Disk (Represents writing/saving)
-    "CLOSE": "📂",  # Check Box (Represents completion/closing)
+    # --- CHANGE: Changed back to Folder emoji for CLOSE ---
+    "CLOSE": "📂",  # File Folder (Represents closing, matching OPEN)
+    # ----------------------------------------------------
     "DELETE": "🗑️",  # Wastebasket (Represents deletion)
     "RENAME": "🔄",  # Arrows Counterclockwise (Represents renaming)
     "STAT": "👀",  # Eyes (Represents stat/access/lookup)
@@ -37,6 +39,7 @@ STATUS_EMOJI_MAP = {
 def get_emoji_history_string(file_info: FileInfo, max_len: int = 5) -> str:
     """
     Generates a string of emojis representing recent file activity history.
+    Accepts FileInfo object (path attribute is bytes, but not used here).
 
     Args:
         file_info: The FileInfo object containing the event history.
@@ -45,34 +48,28 @@ def get_emoji_history_string(file_info: FileInfo, max_len: int = 5) -> str:
     Returns:
         A string of emojis (most recent first), padded with spaces.
     """
+    # This function only uses status, is_open, and event_history from FileInfo.
+    # It does not directly interact with the bytes path. No changes needed.
+
     if not file_info:
         return " " * max_len  # Return padding if no info
 
     # Check for overriding status first
     if file_info.status in STATUS_EMOJI_MAP:
-        # If deleted or error status, show that prominently, maybe repeat it?
-        # Let's just show it once at the start for now.
         status_emoji = STATUS_EMOJI_MAP[file_info.status]
-        # Fill remaining space with padding or older history? Let's pad.
         return f"{status_emoji}{' ' * (max_len - 1)}"
 
     emojis = []
-    # Iterate through event history in reverse (most recent first)
-    # Use file_info.recent_event_types for a quicker summary if desired,
-    # but iterating history gives more detail if needed. Let's use history.
     processed_events = 0
     for event in reversed(file_info.event_history):
         if processed_events >= max_len:
             break
 
         event_type = str(event.get("type", "UNKNOWN")).upper()
-        # Basic error check simplification
         success = event.get("success", True)
         if not success:
-            # If the specific event failed, show error emoji for that event
             emoji = EVENT_EMOJI_MAP["ERROR"]
         else:
-            # Get emoji from map, fallback to default
             emoji = EVENT_EMOJI_MAP.get(event_type, DEFAULT_EMOJI)
 
         # Avoid adding consecutive duplicates (e.g., multiple writes)

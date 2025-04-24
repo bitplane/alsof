@@ -1,5 +1,5 @@
 # Filename: src/lsoph/backend/psutil/backend.py
-"""Psutil backend implementation using polling."""
+"""Psutil backend implementation using polling. Works with bytes paths."""
 
 import asyncio
 import logging
@@ -13,6 +13,7 @@ from lsoph.monitor import Monitor
 from ..base import Backend
 
 # Import helper functions and availability check from sibling module
+# Helpers now return bytes paths where applicable
 from .helpers import (
     PSUTIL_AVAILABLE,
     _get_process_cwd,
@@ -41,7 +42,7 @@ DEFAULT_PSUTIL_POLL_INTERVAL = 0.5
 
 # --- Async Backend Class ---
 class Psutil(Backend):
-    """Async backend implementation using psutil polling."""
+    """Async backend implementation using psutil polling. Uses bytes paths internally."""
 
     # Class attribute for the command-line name
     backend_name = "psutil"
@@ -72,30 +73,35 @@ class Psutil(Backend):
         self,
         pid: int,
         proc: "psutil.Process | None",  # Use psutil.Process if available
-        pid_cwd_cache: dict[int, str | None],
+        # --- CWD IS NOW BYTES ---
+        pid_cwd_cache: dict[int, bytes | None],
+        # ----------------------
     ):
-        """Updates the CWD cache if the PID is not already present."""
+        """Updates the CWD cache (bytes) if the PID is not already present."""
         if proc and pid not in pid_cwd_cache:
-            cwd = _get_process_cwd(proc)
-            pid_cwd_cache[pid] = cwd  # Store None if CWD retrieval failed
+            # _get_process_cwd returns bytes or None
+            cwd_bytes = _get_process_cwd(proc)
+            pid_cwd_cache[pid] = cwd_bytes  # Store bytes or None
 
     def _resolve_path(
-        self, pid: int, path: str, pid_cwd_cache: dict[int, str | None]
-    ) -> str:
-        """Resolves a relative path using the cached CWD."""
-        # Check for absolute paths (Unix/Windows) or special markers
-        if path.startswith(("/", "<", "@")) or (len(path) > 1 and path[1] == ":"):
-            return path
-        cwd = pid_cwd_cache.get(pid)
+        self, pid: int, path: bytes, pid_cwd_cache: dict[int, bytes | None]
+    ) -> bytes:
+        """Resolves a relative bytes path using the cached CWD (bytes)."""
+        # Check for absolute paths (Unix/Windows) or special markers (bytes)
+        # Use os.path functions which accept bytes
+        if os.path.isabs(path) or path.startswith((b"<", b"@")):
+            return os.path.normpath(path)
+
+        cwd: bytes | None = pid_cwd_cache.get(pid)
         if cwd:
             try:
-                # Use os.path.normpath for better path normalization
+                # Use os.path.normpath/join for bytes paths
                 return os.path.normpath(os.path.join(cwd, path))
             except ValueError as e:  # Catch errors during join/normpath
                 log.warning(
-                    f"Error joining path '{path}' with CWD '{cwd}' for PID {pid}: {e}"
+                    f"Error joining path {os.fsdecode(path)!r} with CWD {os.fsdecode(cwd)!r} for PID {pid}: {e}"
                 )
-        # Return original path if CWD is unknown or join fails
+        # Return original bytes path if CWD is unknown or join fails
         return path
 
     def _process_pid_files(
@@ -103,39 +109,45 @@ class Psutil(Backend):
         pid: int,
         proc: "psutil.Process",  # Use psutil.Process if available
         timestamp: float,
-        pid_cwd_cache: dict[int, str | None],
-        seen_fds: dict[int, dict[int, tuple[str, bool, bool]]],
+        # --- CWD AND SEEN_FDS USE BYTES ---
+        pid_cwd_cache: dict[int, bytes | None],
+        seen_fds: dict[int, dict[int, tuple[bytes, bool, bool]]],
+        # ---------------------------------
     ) -> set[int]:
-        """Processes open files for a single PID, updating monitor state."""
+        """Processes open files (bytes paths) for a single PID, updating monitor state."""
         current_pid_fds: set[int] = set()
-        # Use helper from helpers module
+        # Use helper from helpers module (_get_process_open_files returns bytes paths)
         open_files_data = _get_process_open_files(proc)
 
         for file_info in open_files_data:
-            path, fd, mode = (
-                file_info["path"],
-                file_info["fd"],
-                file_info.get("mode", ""),
-            )
+            # --- PATH IS NOW BYTES ---
+            path_bytes: bytes = file_info["path"]
+            # -------------------------
+            fd: int = file_info["fd"]
+            mode: str = file_info.get("mode", "")
+
             # Skip invalid FDs (like -1 for sockets)
             if fd < 0:
                 continue
 
             current_pid_fds.add(fd)
-            resolved_path = self._resolve_path(pid, path, pid_cwd_cache)
+            # _resolve_path accepts and returns bytes
+            resolved_path_bytes = self._resolve_path(pid, path_bytes, pid_cwd_cache)
 
             # Determine read/write capability based on mode
             can_read = "r" in mode or "+" in mode
             can_write = "w" in mode or "a" in mode or "+" in mode
 
-            # Check against previous state stored in seen_fds
-            previous_state = seen_fds.get(pid, {}).get(fd)
+            # Check against previous state stored in seen_fds (bytes paths)
+            previous_state: tuple[bytes, bool, bool] | None = seen_fds.get(pid, {}).get(
+                fd
+            )
             is_new = previous_state is None
             has_changed = False
             if not is_new:
-                old_path, old_read, old_write = previous_state
+                old_path_bytes, old_read, old_write = previous_state
                 has_changed = (
-                    old_path != resolved_path
+                    old_path_bytes != resolved_path_bytes
                     or old_read != can_read
                     or old_write != can_write
                 )
@@ -144,32 +156,45 @@ class Psutil(Backend):
             if is_new or has_changed:
                 # If changed, simulate close of old state first
                 if has_changed:
-                    old_path, _, _ = previous_state
+                    old_path_bytes, _, _ = previous_state
+                    # Call monitor.close (path not needed here)
                     self.monitor.close(pid, fd, True, timestamp, source="psutil_change")
 
-                # Report open event
+                # Report open event with bytes path
                 self.monitor.open(
-                    pid, resolved_path, fd, True, timestamp, source="psutil", mode=mode
+                    pid,
+                    resolved_path_bytes,
+                    fd,
+                    True,
+                    timestamp,
+                    source="psutil",
+                    mode=mode,
                 )
-                # Update seen_fds cache
-                seen_fds.setdefault(pid, {})[fd] = (resolved_path, can_read, can_write)
+                # Update seen_fds cache with bytes path
+                seen_fds.setdefault(pid, {})[fd] = (
+                    resolved_path_bytes,
+                    can_read,
+                    can_write,
+                )
 
                 # Report read/write based on mode (as psutil doesn't track operations)
                 if can_read:
+                    # Call monitor.read with bytes path
                     self.monitor.read(
                         pid,
                         fd,
-                        resolved_path,
+                        resolved_path_bytes,
                         True,
                         timestamp,
                         source="psutil_mode",
                         bytes=0,
                     )
                 if can_write:
+                    # Call monitor.write with bytes path
                     self.monitor.write(
                         pid,
                         fd,
-                        resolved_path,
+                        resolved_path_bytes,
                         True,
                         timestamp,
                         source="psutil_mode",
@@ -182,7 +207,9 @@ class Psutil(Backend):
         pid: int,
         current_pid_fds: set[int],
         timestamp: float,
-        seen_fds: dict[int, dict[int, tuple[str, bool, bool]]],
+        # --- SEEN_FDS USES BYTES ---
+        seen_fds: dict[int, dict[int, tuple[bytes, bool, bool]]],
+        # -------------------------
     ):
         """Detects and reports closed FDs by comparing current and previous state."""
         if pid not in seen_fds:
@@ -195,7 +222,9 @@ class Psutil(Backend):
         for fd in previous_pid_fds:
             if fd not in current_pid_fds:
                 # FD was present before, but not now -> closed
-                path, _, _ = seen_fds[pid][fd]  # Get path from cached state
+                # Path not needed for monitor.close, but log it if useful
+                # path_bytes, _, _ = seen_fds[pid][fd]  # Get bytes path from cached state
+                # log.debug(f"Closing FD {fd} for PID {pid} (Path: {os.fsdecode(path_bytes)!r})")
                 self.monitor.close(pid, fd, True, timestamp, source="psutil_poll")
                 # Remove the closed FD from the cache
                 del seen_fds[pid][fd]
@@ -210,13 +239,16 @@ class Psutil(Backend):
         self,
         monitored_pids: set[int],
         pid_exists_status: dict[int, bool],
-        pid_cwd_cache: dict[int, str | None],
-        seen_fds: dict[int, dict[int, tuple[str, bool, bool]]],
+        # --- CWD AND SEEN_FDS USE BYTES ---
+        pid_cwd_cache: dict[int, bytes | None],
+        seen_fds: dict[int, dict[int, tuple[bytes, bool, bool]]],
+        # ---------------------------------
         track_descendants: bool,
     ) -> set[int]:
         """
         Performs a single polling cycle.
-        Accepts state dictionaries as arguments and returns updated monitored_pids.
+        Accepts state dictionaries (using bytes paths) as arguments
+        and returns updated monitored_pids.
         """
         timestamp = time.time()
         pids_in_this_poll = set(monitored_pids)  # Copy to iterate safely
@@ -238,9 +270,10 @@ class Psutil(Backend):
                                 f"Found new child process: {child_pid} (parent: {pid})"
                             )
                             newly_found_pids.add(child_pid)
-                            # Mark as existing and cache CWD immediately
+                            # Mark as existing and cache CWD (bytes) immediately
                             pid_exists_status[child_pid] = True
                             child_proc = _get_process_info(child_pid)
+                            # _update_cwd_cache works with bytes
                             self._update_cwd_cache(child_pid, child_proc, pid_cwd_cache)
             # Add newly found PIDs to the main sets
             if newly_found_pids:
@@ -260,10 +293,13 @@ class Psutil(Backend):
             if proc:
                 # Process exists, update status and process files
                 pid_exists_status[pid] = True
+                # _update_cwd_cache works with bytes
                 self._update_cwd_cache(pid, proc, pid_cwd_cache)
+                # _process_pid_files works with bytes paths
                 current_pid_fds = self._process_pid_files(
                     pid, proc, timestamp, pid_cwd_cache, seen_fds
                 )
+                # _detect_and_handle_closures works with bytes paths
                 self._detect_and_handle_closures(
                     pid, current_pid_fds, timestamp, seen_fds
                 )
@@ -294,7 +330,7 @@ class Psutil(Backend):
                 f"Removing {len(pids_to_remove)} non-existent PIDs from monitoring set: {pids_to_remove}"
             )
             monitored_pids.difference_update(pids_to_remove)
-            # Clean up associated state caches
+            # Clean up associated state caches (bytes paths)
             for pid in pids_to_remove:
                 pid_cwd_cache.pop(pid, None)
                 seen_fds.pop(pid, None)
@@ -305,19 +341,26 @@ class Psutil(Backend):
     async def _run_loop(
         self, initial_pids: list[int], track_descendants: bool
     ):  # Use list
-        """The core async monitoring loop, shared by attach and run_command."""
+        """
+        The core async monitoring loop, shared by attach and run_command.
+        Manages state using bytes paths.
+        """
         log.info(
             f"Starting psutil monitoring loop. Initial PIDs: {initial_pids}, Track Descendants: {track_descendants}"
         )
 
-        # --- State Management within the loop ---
+        # --- State Management within the loop (using bytes paths) ---
         monitored_pids: set[int] = set(initial_pids)
         pid_exists_status: dict[int, bool] = {
             pid: True for pid in initial_pids
         }  # Use dict
-        pid_cwd_cache: dict[int, str | None] = {}  # Use dict
-        seen_fds: dict[int, dict[int, tuple[str, bool, bool]]] = {}  # Use dict
-        # Initial CWD cache population
+        # --- CWD AND SEEN_FDS USE BYTES ---
+        pid_cwd_cache: dict[int, bytes | None] = {}  # Use dict, holds bytes
+        seen_fds: dict[int, dict[int, tuple[bytes, bool, bool]]] = (
+            {}
+        )  # Use dict, holds bytes
+        # ---------------------------------
+        # Initial CWD cache population (bytes)
         for pid in initial_pids:
             proc = _get_process_info(pid)
             self._update_cwd_cache(pid, proc, pid_cwd_cache)
@@ -327,7 +370,7 @@ class Psutil(Backend):
             while not self.should_stop:
                 start_time = time.monotonic()
 
-                # Perform the synchronous polling logic, passing state
+                # Perform the synchronous polling logic, passing state (bytes paths)
                 # This function now modifies the state dicts/sets directly
                 updated_monitored_pids = self._poll_cycle(
                     monitored_pids,

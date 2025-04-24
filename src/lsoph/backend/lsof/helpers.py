@@ -1,16 +1,20 @@
 # Filename: src/lsoph/backend/lsof/helpers.py
-"""Helper functions for the lsof backend."""
+"""Helper functions for the lsof backend. Works with bytes paths."""
 
 import asyncio
 import logging
+import os  # Needed for os.fsdecode
 import shutil
 import time
 from collections.abc import AsyncIterator
 from typing import Any
 
+# Import TRACE_LEVEL_NUM for logging
+from lsoph.log import TRACE_LEVEL_NUM
 from lsoph.monitor import Monitor
 
 # Import parsing functions from the sibling module
+# _parse_lsof_f_output will now accept bytes lines
 from .parse import _parse_fd, _parse_lsof_f_output
 
 log = logging.getLogger(__name__)  # Use specific logger
@@ -28,9 +32,9 @@ async def _read_stream(
     stream_name: str,
     process_pid: int | str,
     timeout: float,
-) -> list[str]:
-    """Reads lines from a stream with a timeout."""
-    lines = []
+) -> list[bytes]:  # Returns list of bytes
+    """Reads lines (as bytes) from a stream with a timeout."""
+    lines: list[bytes] = []  # Store bytes
     if not stream:
         return lines
     while True:
@@ -53,15 +57,22 @@ async def _read_stream(
 
         if not line_bytes:
             break  # EOF reached
-        lines.append(line_bytes.decode("utf-8", errors="replace").strip())
+        # Append raw bytes, stripping only trailing newline bytes if present
+        if line_bytes.endswith(b"\n"):
+            lines.append(line_bytes[:-1])
+        elif line_bytes.endswith(b"\r\n"):
+            lines.append(line_bytes[:-2])
+        else:
+            lines.append(line_bytes)
+        # DO NOT DECODE HERE
     return lines
 
 
 async def _run_lsof_command_async(
     pids: list[int] | None = None,
-) -> AsyncIterator[str]:
+) -> AsyncIterator[bytes]:  # Yields bytes
     """
-    Runs the lsof command asynchronously and yields its raw standard output lines.
+    Runs the lsof command asynchronously and yields its raw standard output lines as bytes.
     Handles potential hangs using a timeout.
     """
     lsof_path = shutil.which("lsof")
@@ -71,6 +82,8 @@ async def _run_lsof_command_async(
     # Base command: -n (no host resolution), -P (no port resolution), -F pcftn (parseable output)
     # Added +c 0 to show full command names
     # Added +L to prevent listing link counts (can be slow)
+    # Use bytes for command parts that might interact with filesystem directly if needed,
+    # though usually exec takes strings. Sticking with strings for cmd list itself.
     cmd = [lsof_path, "-n", "-P", "+c", "0", "+L", "-F", "pcftn"]
     if pids:
         # Filter out non-positive PIDs just in case
@@ -102,6 +115,7 @@ async def _run_lsof_command_async(
         try:
             # Pass necessary info to the helper function
             read_timeout = LSOF_COMMAND_TIMEOUT / 2
+            # _read_stream now returns list[bytes]
             stdout_task = asyncio.create_task(
                 _read_stream(process.stdout, "stdout", process_pid_str, read_timeout)
             )
@@ -144,21 +158,24 @@ async def _run_lsof_command_async(
                         log.error(f"Error killing timed-out lsof process: {kill_e}")
                 raise TimeoutError("lsof command timed out")  # Signal timeout to caller
 
-            # Process finished within timeout, get results
-            stdout_lines = await stdout_task
-            stderr_lines = await stderr_task
+            # Process finished within timeout, get results (as bytes)
+            stdout_lines_bytes: list[bytes] = await stdout_task
+            stderr_lines_bytes: list[bytes] = await stderr_task
             return_code = await process_wait_task  # Get exit code
 
-            # Log stderr if any content was captured
-            if stderr_lines:
+            # Log stderr if any content was captured (decode for logging)
+            if stderr_lines_bytes:
+                stderr_str = "\n".join(
+                    b.decode("utf-8", "replace") for b in stderr_lines_bytes
+                )
                 log.debug(
                     f"lsof stderr (PID {process_pid_str}, Exit Code {return_code}):\n"
-                    + "\n".join(stderr_lines)
+                    + stderr_str
                 )
 
-            # Yield stdout lines for parsing
-            for line in stdout_lines:
-                yield line
+            # Yield stdout lines (as bytes) for parsing
+            for line_bytes in stdout_lines_bytes:
+                yield line_bytes
 
             # Check exit code after processing output
             # lsof exits with 1 if some PIDs weren't found or other non-fatal issues
@@ -195,19 +212,26 @@ async def _run_lsof_command_async(
 def _process_lsof_record(
     record: dict[str, Any], monitor: Monitor, timestamp: float
 ) -> None:
-    """Process a single parsed lsof record and update the monitor state."""
+    """
+    Process a single parsed lsof record (path is bytes) and update the monitor state.
+    """
     pid = record.get("pid")
-    path = record.get("path")
-    if not (pid and path):
+    # --- PATH IS NOW BYTES ---
+    path_bytes: bytes | None = record.get("path")
+    # ------------------------
+    # Use fsdecode for safe logging
+    log_path_str = os.fsdecode(path_bytes) if path_bytes else "None"
+
+    if not (pid and path_bytes):
         log.debug(f"Skipping lsof record missing PID or path: {record}")
         return
 
     # Use helper to get or create FileInfo (handles ignored paths)
-    # This ensures we don't process events for paths the user wants ignored
-    info = monitor._get_or_create_fileinfo(path, timestamp)
+    # Pass bytes path to monitor method
+    info = monitor._get_or_create_fileinfo(path_bytes, timestamp)
     if not info:
         # Using trace level logging requires a custom setup or library like 'loguru'
-        # log.trace(f"Skipping lsof record for ignored/invalid path: {path}")
+        # log.trace(f"Skipping lsof record for ignored/invalid path: {log_path_str!r}")
         return  # Path was ignored or invalid
 
     fd = record.get("fd")
@@ -227,24 +251,28 @@ def _process_lsof_record(
     # Handle different types of entries based on FD presence/value
     if fd is None:  # Special file type (cwd, txt, mem, DEL, etc.)
         # Treat these as access/stat operations in the monitor
-        # log.trace(f"Processing lsof special entry: PID={pid}, FD={fd_str}, Path={path}")
-        monitor.stat(pid, path, True, timestamp, **details)
+        # log.trace(f"Processing lsof special entry: PID={pid}, FD={fd_str}, Path={log_path_str!r}")
+        # Call monitor.stat with bytes path
+        monitor.stat(pid, path_bytes, True, timestamp, **details)
         # Specific logging for deleted-but-mapped files
         if fd_str == "DEL":
-            log.debug(f"PID {pid} has deleted file mapped: {path}")
+            log.debug(f"PID {pid} has deleted file mapped: {log_path_str!r}")
             # Consider adding a specific status or detail for this case in FileInfo?
     elif fd >= 0:
         # Regular file descriptor
-        # log.trace(f"Processing lsof FD entry: PID={pid}, FD={fd}, Path={path}, Mode={mode}")
+        # log.trace(f"Processing lsof FD entry: PID={pid}, FD={fd}, Path={log_path_str!r}, Mode={mode}")
         # Report open event (idempotent, ensures FD is mapped)
-        monitor.open(pid, path, fd, True, timestamp, **details)
+        # Call monitor.open with bytes path
+        monitor.open(pid, path_bytes, fd, True, timestamp, **details)
 
         # Simulate read/write based on mode flags ('r', 'w', 'u')
         # This is an approximation as lsof only shows the open mode, not actual operations
         if "r" in mode or "u" in mode:
-            monitor.read(pid, fd, path, True, timestamp, bytes=0, **details)
+            # Call monitor.read with bytes path
+            monitor.read(pid, fd, path_bytes, True, timestamp, bytes=0, **details)
         if "w" in mode or "u" in mode:
-            monitor.write(pid, fd, path, True, timestamp, bytes=0, **details)
+            # Call monitor.write with bytes path
+            monitor.write(pid, fd, path_bytes, True, timestamp, bytes=0, **details)
     else:
         # Should not happen if _parse_fd works correctly, but log defensively
         log.debug(f"Skipping lsof record with invalid FD: {record}")
@@ -253,62 +281,78 @@ def _process_lsof_record(
 async def _perform_lsof_poll_async(
     pids_to_monitor: list[int],
     monitor: Monitor,
-    seen_fds: dict[int, set[tuple[int, str]]],
-) -> tuple[dict[int, set[tuple[int, str]]], set[int]]:
+    # --- seen_fds NOW STORES BYTES PATHS ---
+    seen_fds: dict[int, set[tuple[int, bytes]]],
+) -> tuple[dict[int, set[tuple[int, bytes]]], set[int]]:
+    # ----------------------------------------
     """
     Performs a single async poll cycle using lsof.
 
-    Fetches lsof data, parses it, updates the monitor state, detects closures,
+    Fetches lsof data (bytes), parses it, updates the monitor state, detects closures,
     and returns the current state of open FDs and the PIDs seen in the output.
+    Logs raw lines at TRACE level.
 
     Args:
         pids_to_monitor: List of PIDs to query with lsof.
         monitor: The central Monitor instance to update.
         seen_fds: The state of FDs from the *previous* poll cycle, used for comparison.
-                  Format: {pid: {(fd, path), ...}}
+                  Format: {pid: {(fd, path_bytes), ...}}
 
     Returns:
         A tuple containing:
-        - current_fds: State of FDs found in *this* poll cycle. Format: {pid: {(fd, path), ...}}
+        - current_fds: State of FDs found in *this* poll cycle. Format: {pid: {(fd, path_bytes), ...}}
         - pids_seen_in_output: Set of PIDs that appeared in the lsof output.
     """
     timestamp = time.time()  # Timestamp for this poll cycle
-    current_fds: dict[int, set[tuple[int, str]]] = {}  # FDs found in this poll
+    # --- current_fds NOW STORES BYTES PATHS ---
+    current_fds: dict[int, set[tuple[int, bytes]]] = {}  # FDs found in this poll
+    # ------------------------------------------
     pids_seen_in_output: set[int] = set()  # PIDs found in this poll's output
     record_count = 0
     lines_processed = 0
+    # --- Check if TRACE level is enabled ---
+    trace_enabled = log.isEnabledFor(TRACE_LEVEL_NUM)
+    # ---------------------------------------
 
     if not pids_to_monitor:
         log.debug("Skipping lsof poll cycle: no PIDs to monitor.")
         return seen_fds, pids_seen_in_output  # Return previous state, no PIDs seen
 
     try:
-        # 1. Run lsof command asynchronously and get output lines
-        lsof_output_lines = []
+        # 1. Run lsof command asynchronously and get output lines (bytes)
+        lsof_output_lines_bytes: list[bytes] = []
         log.debug(f"Starting lsof command for {len(pids_to_monitor)} PIDs...")
-        async for line in _run_lsof_command_async(pids_to_monitor):
-            lsof_output_lines.append(line)
+        # _run_lsof_command_async yields bytes
+        async for line_bytes in _run_lsof_command_async(pids_to_monitor):
+            # --- Log raw line if TRACE enabled ---
+            if trace_enabled:
+                log.log(TRACE_LEVEL_NUM, f"Raw lsof line: {line_bytes!r}")
+            # -------------------------------------
+            lsof_output_lines_bytes.append(line_bytes)
             lines_processed += 1
         log.debug(f"lsof command finished, processed {lines_processed} lines.")
 
-        # 2. Parse the collected lines
-        parsed_records = _parse_lsof_f_output(iter(lsof_output_lines))
+        # 2. Parse the collected bytes lines
+        # _parse_lsof_f_output now accepts iterator of bytes
+        parsed_records = _parse_lsof_f_output(iter(lsof_output_lines_bytes))
 
         # 3. Process each record: update monitor and track current state
         for record in parsed_records:
             record_count += 1
             pid = record.get("pid")
             fd = record.get("fd")
-            path = record.get("path")
+            # --- PATH IS NOW BYTES ---
+            path_bytes: bytes | None = record.get("path")
+            # ------------------------
 
             if pid:
                 pids_seen_in_output.add(pid)  # Track PIDs found in output
 
-            # Store numeric FDs >= 0 and their paths for close detection later
-            if pid and fd is not None and fd >= 0 and path:
-                current_fds.setdefault(pid, set()).add((fd, path))
+            # Store numeric FDs >= 0 and their bytes paths for close detection later
+            if pid and fd is not None and fd >= 0 and path_bytes:
+                current_fds.setdefault(pid, set()).add((fd, path_bytes))
 
-            # Update monitor state based on the record
+            # Update monitor state based on the record (path is bytes)
             _process_lsof_record(record, monitor, timestamp)
         log.debug(f"Processed {record_count} records from lsof output.")
 
@@ -332,14 +376,14 @@ async def _perform_lsof_poll_async(
         # Check if the PID was actually found in the *current* lsof output
         if pid in pids_seen_in_output:
             # PID still exists, check for FDs that were open but are now gone
-            previous_pid_fds = seen_fds.get(pid, set())
-            current_pid_fds = current_fds.get(
+            previous_pid_fds: set[tuple[int, bytes]] = seen_fds.get(pid, set())
+            current_pid_fds: set[tuple[int, bytes]] = current_fds.get(
                 pid, set()
             )  # FDs found for this PID in current poll
-            for fd, path in previous_pid_fds:
-                if (fd, path) not in current_pid_fds:
-                    # This specific (FD, Path) tuple existed before but not now -> closed
-                    # log.trace(f"Detected close: PID={pid}, FD={fd}, Path={path}")
+            for fd, path_bytes in previous_pid_fds:
+                if (fd, path_bytes) not in current_pid_fds:
+                    # This specific (FD, Path_bytes) tuple existed before but not now -> closed
+                    # log.trace(f"Detected close: PID={pid}, FD={fd}, Path={os.fsdecode(path_bytes)!r}")
                     monitor.close(pid, fd, True, timestamp, source="lsof_poll")
                     close_count += 1
         else:
@@ -349,8 +393,8 @@ async def _perform_lsof_poll_async(
                 f"PID {pid} not found in current lsof output, closing its known FDs."
             )
             previous_pid_fds = seen_fds.get(pid, set())
-            for fd, path in previous_pid_fds:
-                # log.trace(f"Closing FD {fd} for exited PID {pid} (Path: {path})")
+            for fd, path_bytes in previous_pid_fds:
+                # log.trace(f"Closing FD {fd} for exited PID {pid} (Path: {os.fsdecode(path_bytes)!r})")
                 monitor.close(pid, fd, True, timestamp, source="lsof_poll_exit")
                 close_count += 1
             # Signal process exit to the monitor for general cleanup related to the PID

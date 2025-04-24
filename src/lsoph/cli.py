@@ -11,6 +11,8 @@ from typing import Any, Type
 
 # Import backend base class and the discovered backends dictionary
 from lsoph.backend import BACKENDS, Backend  # Import BACKENDS dict
+
+# Import TRACE_LEVEL_NUM if needed, or just rely on setup_logging
 from lsoph.log import LOG_QUEUE, setup_logging
 from lsoph.monitor import Monitor
 from lsoph.ui.app import LsophApp
@@ -64,7 +66,9 @@ def parse_arguments(
     parser.add_argument(
         "--log",
         default="INFO",
+        # --- ADD TRACE to choices ---
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL", "TRACE"],
+        # --------------------------
         help="Set the logging level for the application (default: INFO)",
     )
     # Mutually exclusive group for attach (-p) or run (-c) mode
@@ -119,6 +123,7 @@ def main(argv: list[str] | None = None) -> int:
         args = parse_arguments(BACKENDS, argv)
 
         # Re-setup logging with the level specified in args
+        # setup_logging now handles "TRACE"
         setup_logging(args.log)
         log.info("Starting lsoph...")
         log.debug(f"Parsed arguments: {args}")

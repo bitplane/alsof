@@ -1,14 +1,13 @@
 # Filename: src/lsoph/ui/file_data_table.py
 """
 A specialized DataTable widget using index-as-key for partial updates.
-NOTE: This approach uses the visual index as the RowKey, which can lead
-      to unexpected behavior if rows are added/removed in ways that disrupt
-      the expected visual order compared to the underlying data sort order.
+Handles bytes paths from the Monitor and decodes for display.
 """
 
 import logging
+import os  # For os.fsdecode
 import time
-from typing import Any, Dict, List, Optional, Set, Tuple  # Restored List
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from rich.text import Text
 from textual import events
@@ -17,33 +16,35 @@ from textual.widgets import DataTable
 from textual.widgets.data_table import CellKey, RowKey
 
 from lsoph.monitor import FileInfo
+
+# short_path utility now accepts bytes and returns str
 from lsoph.util.short_path import short_path
 
-# Import the new emoji helper
+# Import the new emoji helper (doesn't need changes)
 from .emoji import get_emoji_history_string
 
 log = logging.getLogger("lsoph.ui.table")
 
-# Renamed Type alias for the visual data tuple (must match column order)
+# Type alias for the visual data tuple (strings for display)
 TableRow = Tuple[Text, Text, Text]
 COLUMN_KEYS = ["history", "path", "age"]  # Order must match TableRow
 
 
 # --- Formatting Helper ---
-# Renamed function
 def _render_row(
     info: FileInfo, available_width: int, current_time: float
-) -> TableRow:  # Returns visual components directly
-    """Formats FileInfo into data suitable for DataTable.add_row/update_cell."""
-    # (Implementation remains the same)
+) -> TableRow:  # Returns visual components (Text objects)
+    """Formats FileInfo (with bytes path) into Text suitable for DataTable."""
 
     # --- Get Emoji History ---
     MAX_EMOJI_HISTORY = 5  # Keep consistent with column width
     emoji_history_str = get_emoji_history_string(info, MAX_EMOJI_HISTORY)
     # --- End Emoji History ---
 
-    # Shorten path display *text* using the calculated available width
-    path_display = short_path(info.path, max(1, available_width))
+    # --- DECODE AND SHORTEN PATH ---
+    # Use short_path utility which accepts bytes and returns decoded, shortened string
+    path_display_str = short_path(info.path, max(1, available_width))
+    # -----------------------------
 
     # Format age string
     age_seconds = current_time - info.last_activity_ts
@@ -73,7 +74,7 @@ def _render_row(
 
     # Create Text objects with styles
     recent_text = Text(f" {emoji_history_str} ")  # Pad slightly
-    path_text = Text(path_display, style=style)
+    path_text = Text(path_display_str, style=style)  # Use decoded string
     age_text = Text(age_str.rjust(4), style=style)
 
     return recent_text, path_text, age_text
@@ -86,7 +87,7 @@ class FileDataTable(DataTable):
     """
     A DataTable specialized for displaying and managing FileInfo.
     Uses stringified index as RowKey and attempts partial updates.
-    Simplified error handling and logging.
+    Stores original bytes paths internally but displays decoded strings.
     Attempts to maintain relative cursor screen position during updates.
     """
 
@@ -99,9 +100,10 @@ class FileDataTable(DataTable):
         super().__init__(*args, **kwargs)
         self.cursor_type = "row"
         self.zebra_stripes = True
-        # Renamed: Stores the list of paths in the order they were last displayed
-        self._paths: List[str] = []
-        # Renamed type alias used in Dict value
+        # --- _paths NOW STORES BYTES ---
+        self._paths: List[bytes] = []
+        # -----------------------------
+        # Cache stores visual Text objects (TableRow)
         self._row_data_cache: Dict[str, TableRow] = {}  # Key is str(index)
 
     def on_mount(self) -> None:
@@ -124,115 +126,120 @@ class FileDataTable(DataTable):
         return max(1, calculated_width)
 
     @property
-    def selected_path(self) -> Optional[str]:
-        """Returns the path string of the data visually at the cursor row."""
-        # Simplified: relies on cursor_row being valid or index check failing
+    def selected_path(self) -> Optional[bytes]:  # Returns bytes path
+        """Returns the original bytes path of the data visually at the cursor row."""
         idx = self.cursor_row
-        # Use renamed internal list
-        # Allow IndexError if idx >= len(...)
+        # Use internal bytes list
         if idx >= 0 and idx < len(self._paths):
-            return self._paths[idx]
+            return self._paths[idx]  # Return bytes path
         return None  # Return None if index invalid (< 0)
 
     def on_resize(self, event: events.Resize) -> None:
         """Update path column width on resize."""
         new_width = self._get_path_column_width()
         path_column = self.columns.get("path")
-        # Check column exists before accessing width
         if path_column and path_column.width != new_width:
             path_column.width = new_width
-            # Update text widths immediately after resize
-            self._refresh_path_text()  # Renamed method call
-            self.refresh()  # Refresh after resize and text update
+            # Update displayed path text widths immediately after resize
+            self._refresh_path_text()
+            self.refresh()
 
-    # Renamed method
     def _refresh_path_text(self):
-        """Force recalculation of path text for all rows after resize."""
+        """Force recalculation of displayed path text for all rows after resize."""
         path_text_width = self._get_path_column_width()
         current_keys = list(self.rows.keys())
         for row_key_obj in current_keys:
-            # Allow errors below to propagate if key is invalid or state inconsistent
             if row_key_obj.value is None:
                 continue
             cache_key = str(row_key_obj.value)
-            try:  # Add try block for int conversion
-                idx_key = int(cache_key)  # Expect value to be convertible int
+            try:
+                idx_key = int(cache_key)
             except ValueError:
-                # log.warning(f"Invalid index key value '{cache_key}' during text refresh.")
-                continue  # Skip if key is not an integer index
+                continue
 
-            # Use renamed type alias
             cached_data: Optional[TableRow] = self._row_data_cache.get(cache_key)
 
-            # Allow IndexError if idx_key is out of bounds for _paths
-            # Check lower bound explicitly
             if cached_data and idx_key >= 0 and idx_key < len(self._paths):
-                original_path = self._paths[idx_key]  # Use renamed list
-                new_path_text = Text(
-                    short_path(original_path, max(1, path_text_width)),
-                    style=cached_data[1].style,
+                # --- GET ORIGINAL BYTES PATH ---
+                original_path_bytes = self._paths[idx_key]
+                # -----------------------------
+                # --- DECODE AND SHORTEN ---
+                new_path_display_str = short_path(
+                    original_path_bytes, max(1, path_text_width)
                 )
-                if new_path_text.plain != cached_data[1].plain:
-                    # Allow KeyError if row was removed concurrently
-                    self.update_cell(
-                        cache_key, "path", new_path_text, update_width=False
-                    )
-                    self._row_data_cache[cache_key] = (
-                        cached_data[0],
-                        new_path_text,
-                        cached_data[2],
-                    )
+                # ------------------------
+                new_path_text = Text(
+                    new_path_display_str,
+                    style=cached_data[1].style,  # Keep original style
+                )
 
-    # Renamed method
+                if new_path_text.plain != cached_data[1].plain:
+                    try:
+                        self.update_cell(
+                            cache_key, "path", new_path_text, update_width=False
+                        )
+                        self._row_data_cache[cache_key] = (
+                            cached_data[0],
+                            new_path_text,  # Update cache with new Text
+                            cached_data[2],
+                        )
+                    except KeyError:
+                        log.warning(
+                            f"Row key '{cache_key}' not found during path text refresh."
+                        )
+
     def _find_cursor_pos(
         self,
-        old_idx: int,  # Renamed parameter
-        old_paths: List[str],  # Renamed parameter
-        new_paths: List[str],  # Renamed parameter
+        old_idx: int,
+        old_paths: List[bytes],  # Expects bytes paths
+        new_paths: List[bytes],  # Expects bytes paths
     ) -> int:
         """
-        Finds the new target index for the cursor. Returns -1 if no
-        logical target can be found based on the previous selection.
+        Finds the new target index for the cursor based on bytes paths.
+        Returns -1 if no logical target can be found.
         """
-        selected_path_before: Optional[str] = None
-        # Check bounds BEFORE accessing old_paths
+        selected_path_before: Optional[bytes] = None
         if old_idx >= 0 and old_idx < len(old_paths):
             selected_path_before = old_paths[old_idx]
 
         if not selected_path_before:
-            # No valid selection before, return -1
             return -1
 
+        # Map bytes paths to new indices
         path_map = {path: i for i, path in enumerate(new_paths)}
 
-        # 1. Check if original selected path still exists
+        # 1. Check if original selected bytes path still exists
         if selected_path_before in path_map:
             return path_map[selected_path_before]
 
         # 2. Search backwards up the *previous* list for an item that *still exists*
         for current_check_pos in range(old_idx - 1, -1, -1):
             # Allow potential IndexError if old_idx was invalid relative to old_paths
-            path = old_paths[current_check_pos]
-            if path in path_map:
-                return path_map[path]  # Return the *new* index of the item found above
+            try:
+                path = old_paths[current_check_pos]
+                if path in path_map:
+                    return path_map[path]  # Return the *new* index
+            except IndexError:
+                log.warning(
+                    f"IndexError accessing old_paths at {current_check_pos} in _find_cursor_pos"
+                )
+                break  # Stop searching if index is invalid
 
-        # 3. If nothing found above, return -1 (no logical target)
-        # Corrected comment: Caller handles the -1 case.
+        # 3. If nothing found above, return -1
         return -1
 
-    # Renamed parameter sorted_file_infos -> infos
     def update_data(self, infos: list[FileInfo]) -> None:
         """
         Updates the table content using index as key and attempting partial updates.
+        Accepts FileInfo with bytes paths, displays decoded strings.
         Attempts to maintain relative cursor screen position.
         """
         current_time = time.time()
 
         # --- Preserve Cursor State & Calculate Target Scroll ---
-        # Renamed variables
         old_idx = self.cursor_row
-        old_paths = self._paths  # Use internal state directly, no need to copy list()
-        old_count = len(old_paths)
+        old_paths_bytes = self._paths  # Internal state uses bytes
+        old_count = len(old_paths_bytes)
         old_scroll_y = self.scroll_y
         cursor_screen_offset = -1
 
@@ -240,24 +247,33 @@ class FileDataTable(DataTable):
             cursor_screen_offset = old_idx - old_scroll_y
 
         # --- Prepare New State ---
-        # Renamed variables
-        new_paths = [info.path for info in infos]
-        new_info_map = {info.path: info for info in infos}
-        new_count = len(new_paths)
+        # --- PATHS ARE NOW BYTES ---
+        new_paths_bytes = [info.path for info in infos]
+        new_info_map = {info.path: info for info in infos}  # Map bytes path -> FileInfo
+        # -------------------------
+        new_count = len(new_paths_bytes)
 
-        # --- Calculate Target Cursor Index ---
-        # Renamed variables and method call
-        target_cursor_index = self._find_cursor_pos(old_idx, old_paths, new_paths)
+        # --- Calculate Target Cursor Index (using bytes paths) ---
+        target_cursor_index = self._find_cursor_pos(
+            old_idx, old_paths_bytes, new_paths_bytes
+        )
 
         # --- Attempt to Scroll Viewport *BEFORE* Updates ---
         if target_cursor_index != -1 and cursor_screen_offset != -1:
             target_scroll_y = max(0, target_cursor_index - cursor_screen_offset)
-            max_scroll = max(0, new_count - self.size.height)
+            # Use actual table height for max scroll calculation
+            table_height = (
+                self.content_size.height
+            )  # Or self.size.height if more appropriate
+            max_scroll = max(0, new_count - table_height)
             target_scroll_y = min(target_scroll_y, max_scroll)
             if self.scroll_y != target_scroll_y:
-                # Allow potential errors during scroll setting to propagate
-                self.scroll_y = target_scroll_y
-        # --- End Pre-Update Scroll ---
+                try:
+                    self.scroll_y = target_scroll_y
+                except Exception as scroll_err:
+                    log.warning(
+                        f"Error setting scroll_y to {target_scroll_y}: {scroll_err}"
+                    )
 
         # --- Calculate width for text formatting ---
         path_text_width = self._get_path_column_width()
@@ -267,8 +283,7 @@ class FileDataTable(DataTable):
             path_column.width = path_text_width
 
         # --- Diff and Update ---
-        # Use renamed type alias
-        new_data_cache: Dict[str, TableRow] = {}
+        new_data_cache: Dict[str, TableRow] = {}  # Cache holds visual Text objects
         rows_updated = 0
         rows_added = 0
         rows_removed = 0
@@ -277,69 +292,90 @@ class FileDataTable(DataTable):
         update_limit = min(old_count, new_count)
         for i in range(update_limit):
             index_key = str(i)
-            new_path = new_paths[i]
-            # Allow KeyError if path somehow not in map (indicates inconsistency)
-            new_info = new_info_map[new_path]
+            new_path_bytes = new_paths_bytes[i]  # Get bytes path
+            try:
+                new_info = new_info_map[
+                    new_path_bytes
+                ]  # Look up FileInfo using bytes path
+            except KeyError:
+                log.error(
+                    f"Inconsistency: Path {os.fsdecode(new_path_bytes)!r} not found in new_info_map at index {i}"
+                )
+                continue  # Skip this row if data is inconsistent
 
-            # Use renamed function _render_row
-            new_visuals = _render_row(new_info, path_text_width, current_time)
-            new_data_cache[index_key] = new_visuals
+            # _render_row accepts FileInfo (with bytes path), returns visual Text objects
+            new_visuals: TableRow = _render_row(new_info, path_text_width, current_time)
+            new_data_cache[index_key] = new_visuals  # Cache the visual representation
 
-            # Use renamed type alias
             old_visuals: Optional[TableRow] = self._row_data_cache.get(index_key)
             if new_visuals != old_visuals:
-                # Allow KeyError if row 'i' doesn't exist when expected
-                for col_idx, col_key_str in enumerate(COLUMN_KEYS):
-                    self.update_cell(
-                        index_key,
-                        col_key_str,
-                        new_visuals[col_idx],
-                        update_width=False,
-                    )
-                rows_updated += 1
+                try:
+                    for col_idx, col_key_str in enumerate(COLUMN_KEYS):
+                        self.update_cell(
+                            index_key,
+                            col_key_str,
+                            new_visuals[col_idx],  # Update with new Text object
+                            update_width=False,
+                        )
+                    rows_updated += 1
+                except KeyError:
+                    log.warning(f"Row key '{index_key}' not found during update.")
 
         # 2. Add new rows if new list is longer
         if new_count > old_count:
             for i in range(old_count, new_count):
                 index_key = str(i)
-                new_path = new_paths[i]
-                new_info = new_info_map[new_path]  # Allow KeyError
-                # Use renamed function _render_row
+                new_path_bytes = new_paths_bytes[i]  # Get bytes path
+                try:
+                    new_info = new_info_map[
+                        new_path_bytes
+                    ]  # Look up FileInfo using bytes path
+                except KeyError:
+                    log.error(
+                        f"Inconsistency: Path {os.fsdecode(new_path_bytes)!r} not found in new_info_map at index {i}"
+                    )
+                    continue  # Skip adding row if data is inconsistent
+
+                # _render_row accepts FileInfo (with bytes path), returns visual Text objects
                 new_visuals = _render_row(new_info, path_text_width, current_time)
-                new_data_cache[index_key] = new_visuals
-                # Allow KeyError if key 'i' somehow already exists
-                self.add_row(*new_visuals, key=index_key)
-                rows_added += 1
+                new_data_cache[index_key] = new_visuals  # Cache visual representation
+                try:
+                    self.add_row(*new_visuals, key=index_key)
+                    rows_added += 1
+                except KeyError:
+                    log.warning(f"Row key '{index_key}' already exists during add.")
 
         # 3. Remove extra rows if new list is shorter
         elif old_count > new_count:
             for i in range(old_count - 1, new_count - 1, -1):
                 index_key = str(i)
-                # Allow KeyError if row 'i' doesn't exist
-                self.remove_row(index_key)
-                rows_removed += 1
-                self._row_data_cache.pop(index_key, None)
+                try:
+                    self.remove_row(index_key)
+                    rows_removed += 1
+                except KeyError:
+                    log.warning(f"Row key '{index_key}' not found during remove.")
+                self._row_data_cache.pop(index_key, None)  # Remove from visual cache
 
         # Update internal state caches
-        # Renamed variable
-        self._paths = new_paths
-        self._row_data_cache = new_data_cache
+        self._paths = new_paths_bytes  # Store new list of bytes paths
+        self._row_data_cache = new_data_cache  # Store new visual cache
 
         # --- Move Cursor ---
         if target_cursor_index != -1:
             final_row_count = self.row_count
             if target_cursor_index < final_row_count:
                 if self.cursor_row != target_cursor_index:
-                    self.move_cursor(row=target_cursor_index, animate=False)
-            # REMOVED automatic move to 0 if target is out of bounds
-            # Let the cursor stay where it is if the target is invalid
+                    try:
+                        self.move_cursor(row=target_cursor_index, animate=False)
+                    except Exception as cursor_err:
+                        log.warning(
+                            f"Error moving cursor to {target_cursor_index}: {cursor_err}"
+                        )
             elif final_row_count <= 0:
-                # If table becomes empty, cursor is implicitly invalid, do nothing
-                pass
-            # else: # Reduced logging
-            # Target index is out of bounds, but table not empty.
-            # log.warning(f"Target cursor index {target_cursor_index} out of bounds after update (row_count={final_row_count}). Cursor not moved.")
+                pass  # Table empty, do nothing
+            # else: # Target index out of bounds
+            #     log.warning(f"Target cursor index {target_cursor_index} out of bounds after update (row_count={final_row_count}). Cursor not moved.")
 
         # If target_cursor_index was -1, cursor is not moved.
 
-        self.refresh()
+        # No explicit self.refresh() needed here, as add/update/remove should trigger it.
