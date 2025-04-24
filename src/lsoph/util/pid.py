@@ -54,7 +54,7 @@ def get_cwd(pid: int) -> bytes | None:
         log.debug(f"Retrieved CWD for PID {pid}: {cwd_str!r} -> {cwd_bytes!r}")
         return cwd_bytes
     except psutil.NoSuchProcess:
-        log.warning(f"Process with PID {pid} not found when getting CWD.")
+        log.debug(f"Process with PID {pid} not found when getting CWD.")
         return None
     except psutil.AccessDenied:
         log.warning(f"Access denied getting CWD for PID {pid} via psutil.")

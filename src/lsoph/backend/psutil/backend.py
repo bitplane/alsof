@@ -355,7 +355,7 @@ class Psutil(Backend):
             pid: True for pid in initial_pids
         }  # Use dict
         # --- CWD AND SEEN_FDS USE BYTES ---
-        pid_cwd_cache: dict[int, bytes | None] = {}  # Use dict, holds bytes
+        pid_cwd_cache: dict[int, bytes | None] = {}
         seen_fds: dict[int, dict[int, tuple[bytes, bool, bool]]] = (
             {}
         )  # Use dict, holds bytes

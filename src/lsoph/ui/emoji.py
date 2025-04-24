@@ -16,9 +16,9 @@ EVENT_EMOJI_MAP = {
     "READ": "📖",  # Open Book (Represents reading)
     "WRITE": "💾",  # Floppy Disk (Represents writing/saving)
     # --- CHANGE: Changed back to Folder emoji for CLOSE ---
-    "CLOSE": "📂",  # File Folder (Represents closing, matching OPEN)
+    "CLOSE": "📁",  # File Folder (Represents closing, matching OPEN)
     # ----------------------------------------------------
-    "DELETE": "🗑️",  # Wastebasket (Represents deletion)
+    "DELETE": "❌",  # Cross Mark (Represents deletion)
     "RENAME": "🔄",  # Arrows Counterclockwise (Represents renaming)
     "STAT": "👀",  # Eyes (Represents stat/access/lookup)
     "ACCESS": "👀",  # Group with STAT

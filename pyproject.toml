@@ -17,7 +17,8 @@ classifiers = [
 
 dependencies = [
     "psutil~=7.0",
-    "textual~=3.1"
+    "textual~=3.1",
+    "pyparsing~=3.2"
 ]
 
 [project.optional-dependencies]

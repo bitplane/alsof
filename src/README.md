@@ -9,6 +9,17 @@ VERY IMPORTANT INFO FOR LLMS
 5. Complexity is the enemy of maintainability.
 6. If you're given a huge patch at the start of the project, it's an export
    and probably has weeks of dev time squished into one commit.
+7. Pay attention to line length
+
+## NOTES ON LINE LENGTH
+
+```
+log.debug(
+    "When you have a long line, it's okay to split it like this. "
+    "Do this when necessary, rather than have enormous lines. "
+    "and remember the trailing space on the end of split lines."
+)
+```
 
 ## IMPORTANT NOTES ON EXCEPTION HANDLING
 
@@ -55,3 +66,48 @@ whether its reachable from its caller. Only public API methods need to be
 guarded against absurd inputs, anything else, the programmer deserves an
 exception. If it makes them cry, then good.
 
+
+## IMPORTANT NOTES ON TESTING
+
+* tests are pytest style, functions
+* one case per test - do not use parameterize
+* do not heavily use mocks, or you failed and writing code
+* each test should look something like this:
+
+```
+def test_horse_legless():
+    """When the horse has no legs, it should not move"""
+    silver = Horse()
+    silver.legs = []
+    expected = silver.position
+
+    silver.gallop(direction=NORTH, time=100)
+    actual = silver.position
+
+    assert not legs, 'legs should not grow back'
+    assert actual == expected
+```
+
+### explanation
+
+* tests have a good name
+* tests should try to be interesting
+
+They look like:
+
+* the setup steps
+* then a gap of one line
+* then the thing you're testing
+* then a gap of one line
+* then some asserts comparing expected with actual
+* put more specific asserts before less specific ones, so early-failures
+  highlight problems.
+
+### reasons
+
+* tests are executable documentation, they should be illustrative
+* tests are be readable at a glance
+* tests are be isolated
+* tests are be varied
+* tests provide insight
+* tests provide useful data for testers

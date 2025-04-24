@@ -66,11 +66,19 @@ def parse_arguments(
     parser.add_argument(
         "--log",
         default="INFO",
-        # --- ADD TRACE to choices ---
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL", "TRACE"],
-        # --------------------------
-        help="Set the logging level for the application (default: INFO)",
+        help="Set the logging level for the TUI and file (if specified) (default: INFO)",
     )
+    # --- ADDED: Log file argument ---
+    parser.add_argument(
+        "--log-file",
+        metavar="PATH",
+        type=str,
+        default=None,
+        help="Write logs to the specified file in addition to the TUI.",
+    )
+    # --- END ADDED ---
+
     # Mutually exclusive group for attach (-p) or run (-c) mode
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument(
@@ -107,8 +115,10 @@ def main(argv: list[str] | None = None) -> int:
     and launches the Textual UI.
     """
     # Setup logging first to capture discovery messages from backend init
-    temp_log_level = os.environ.get("LSOPH_LOG_LEVEL", "INFO").upper()
-    setup_logging(temp_log_level)
+    # Parse args first to get log level and file path
+    temp_args = parse_arguments(BACKENDS, argv)
+    # Setup logging with level and optional file path from args
+    setup_logging(temp_args.log, temp_args.log_file)
     log = logging.getLogger("lsoph.cli")  # Get main cli logger
 
     # Check if any backends were discovered during import
@@ -116,15 +126,12 @@ def main(argv: list[str] | None = None) -> int:
     if not BACKENDS:
         # The backend __init__ should have logged a warning.
         print("Error: No monitoring backends available. Exiting.", file=sys.stderr)
+        log.critical("No monitoring backends available. Exiting.")  # Also log it
         return 1  # Indicate failure
 
     try:
-        # Parse arguments using the discovered backends
-        args = parse_arguments(BACKENDS, argv)
-
-        # Re-setup logging with the level specified in args
-        # setup_logging now handles "TRACE"
-        setup_logging(args.log)
+        # Use the already parsed args
+        args = temp_args
         log.info("Starting lsoph...")
         log.debug(f"Parsed arguments: {args}")
 
