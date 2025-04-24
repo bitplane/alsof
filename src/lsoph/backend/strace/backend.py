@@ -10,8 +10,9 @@ import sys
 from collections.abc import AsyncIterator
 from typing import Any
 
-import psutil
+import psutil  # Keep for pid_exists check
 
+# Corrected import path for handlers and helpers
 from lsoph.backend.strace import handlers, helpers
 from lsoph.monitor import Monitor
 from lsoph.util.pid import get_cwd as pid_get_cwd
@@ -28,7 +29,8 @@ from .terminate import terminate_strace_process
 log = logging.getLogger(__name__)
 
 # --- Constants ---
-STRACE_BASE_OPTIONS = ["-f", "-s", "4096", "-xx", "-o", "/dev/stderr"]
+# Restore -qq to suppress attach/detach/exit messages for cleaner parsing
+STRACE_BASE_OPTIONS = ["-f", "-qq", "-s", "4096", "-xx", "-o", "/dev/stderr"]
 # Define default syscalls here
 FILE_STRUCT_SYSCALLS = [
     "open",
@@ -61,6 +63,10 @@ DEFAULT_SYSCALLS = sorted(
 # --- End Constants ---
 
 
+# --- Event Processing Helper ---
+# _process_single_event remains unchanged
+
+
 async def _process_single_event(
     event: Syscall, monitor: Monitor, cwd_map: dict[int, str]
 ):
@@ -82,7 +88,8 @@ async def _process_single_event(
             # Store None to avoid repeated lookups? Or leave it absent?
             # Let's leave it absent for now.
 
-    log.debug(f"Processing event: {event!r}")
+    # Reduced logging
+    # log.debug(f"Processing event: {event!r}")
 
     # Handle specific syscalls that modify state or need special handling first
     if syscall_name in ["chdir", "fchdir"]:
@@ -94,7 +101,7 @@ async def _process_single_event(
         # Clean up CWD map on exit
         if pid in cwd_map:
             del cwd_map[pid]
-            log.debug(f"Removed PID {pid} CWD map on exit.")
+            # log.debug(f"Removed PID {pid} CWD map on exit.") # Reduced logging
         return
 
     # Dispatch to generic handlers for file operations
@@ -146,7 +153,7 @@ class Strace(Backend):  # Renamed from StraceBackend
     ) -> AsyncIterator[str]:
         """Reads lines from the strace stderr stream asynchronously."""
         pid_str = str(self._strace_process.pid) if self._strace_process else "unknown"
-        log.debug(f"Starting stderr reader loop for strace process {pid_str}")
+        # log.debug(f"Starting stderr reader loop for strace process {pid_str}") # Reduced logging
         read_count = 0
         while not stop_event.is_set():
             try:
@@ -166,11 +173,13 @@ class Strace(Backend):  # Renamed from StraceBackend
                 )
                 break
             except Exception as read_err:
-                log.exception(
-                    f"Error reading strace stderr after {read_count} lines: {read_err}"
-                )
+                # Avoid logging common errors when process exits expectedly
+                if not stop_event.is_set():
+                    log.exception(
+                        f"Error reading strace stderr after {read_count} lines: {read_err}"
+                    )
                 break  # Stop reading on error
-        log.debug("Exiting stderr reader loop.")
+        # log.debug("Exiting stderr reader loop.") # Reduced logging
 
     # --- End Stream Reading Helper ---
 
@@ -236,6 +245,7 @@ class Strace(Backend):  # Renamed from StraceBackend
             return
 
         # Use the syscall list defined in __init__
+        # Use STRACE_BASE_OPTIONS which now includes -qq
         strace_command = [
             strace_path,
             *STRACE_BASE_OPTIONS,
@@ -319,6 +329,7 @@ class Strace(Backend):  # Renamed from StraceBackend
             return
 
         # Use the syscall list defined in __init__
+        # Use STRACE_BASE_OPTIONS which now includes -qq
         strace_command = [
             strace_path,
             *STRACE_BASE_OPTIONS,
@@ -402,7 +413,10 @@ class Strace(Backend):  # Renamed from StraceBackend
 
             # Clear the stored process handle after termination attempt
             self._strace_process = None
-        else:
-            log.debug(
-                f"Backend {self.__class__.__name__} stop already signalled."
-            )  # Use class name
+        # else: # Reduced logging
+        # log.debug(f"Backend {self.__class__.__name__} stop already signalled.")
+
+    # --- End Stop Method ---
+
+
+# --- End Backend Class ---

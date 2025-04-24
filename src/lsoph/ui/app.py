@@ -6,9 +6,8 @@ import logging
 import time
 from collections import deque
 from collections.abc import Callable, Coroutine
-from typing import Any, Optional  # Added Optional
+from typing import Any, Optional
 
-# Removed unused imports: Coordinate, CellKey, RowKey, _format_file_info_for_table
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -16,28 +15,24 @@ from textual.containers import Vertical
 from textual.dom import NoMatches
 from textual.reactive import reactive
 
-# Removed DataTable import
-from textual.widgets import Footer, Header, Static
+# Import DataTable event types
+from textual.widgets import DataTable, Footer, Header, Static
 from textual.worker import Worker, WorkerState
 
 from lsoph.backend.base import Backend
-from lsoph.monitor import FileInfo, Monitor  # Keep FileInfo for type hint
+from lsoph.monitor import FileInfo, Monitor
 from lsoph.util.short_path import short_path
 
 from .detail_screen import DetailScreen
 
-# Import the new widget from its new location
-from .file_data_table import FileDataTable  # UPDATED IMPORT PATH
+# Import the FileDataTable widget
+from .file_data_table import FileDataTable
 from .log_screen import LogScreen
 
 # Type alias for the backend coroutine (attach or run_command)
 BackendCoroutine = Coroutine[Any, Any, None]
 
 log = logging.getLogger("lsoph.ui.app")
-
-# REMOVED _format_file_info_for_table helper function - moved to widget
-
-# --- Main Application ---
 
 
 class LsophApp(App[None]):
@@ -51,14 +46,24 @@ class LsophApp(App[None]):
         Binding("q,escape", "quit", "Quit", show=True),
         Binding("l,ctrl+l", "show_log", "Show/Hide Log", show=True),
         # --- Contextual Bindings (Hidden by default, work on main screen) ---
-        Binding("x", "ignore_all", "Ignore All", show=False),
-        Binding("i,backspace,delete", "ignore_selected", "Ignore Sel.", show=False),
-        Binding("d,enter", "show_detail", "Show Detail", show=False),
+        # Ignore / Delete
+        Binding("d,backspace,delete", "ignore_selected", "Ignore Sel.", show=False),
+        # Ignore All
+        Binding(
+            "x,shift+delete,shift+backspace", "ignore_all", "Ignore All", show=False
+        ),
+        # Info / Details (Enter is handled by on_data_table_row_selected/activated)
+        Binding("i", "show_detail", "Show Detail", show=False),
+        # Navigation
+        Binding("g,home", "scroll_home", "Scroll Top", show=False),
+        Binding(
+            "G,end", "scroll_end", "Scroll End", show=False
+        ),  # Use Shift+G for end like Vim
         # --- Debug Bindings (Always hidden) ---
         Binding("ctrl+d", "dump_monitor", "Dump Monitor", show=False),
     ]
 
-    CSS_PATH = "app.css"  # Load CSS from file
+    CSS_PATH = "style.css"  # Load CSS from file
 
     # Reactive variables to trigger updates
     last_monitor_version = reactive(-1)
@@ -78,8 +83,8 @@ class LsophApp(App[None]):
         self.backend_coroutine = backend_coroutine
         self._update_interval = 0.5  # Interval for checking monitor version
         self._backend_worker: Worker | None = None
-        self._backend_stop_signalled = False  # Flag to track if stop was requested
-        self._backend_stopped_notified = False  # Flag to prevent repeated notifications
+        self._backend_stop_signalled = False
+        self._backend_stopped_notified = False
         # Reference to the FileDataTable widget instance
         self._file_table: Optional[FileDataTable] = None
 
@@ -88,7 +93,7 @@ class LsophApp(App[None]):
         yield Header()
         # Use the custom FileDataTable widget
         yield FileDataTable(id="file-table")
-        yield Static(self.status_text, id="status-bar")  # Use reactive variable
+        yield Static(self.status_text, id="status-bar")
         yield Footer()
 
     # --- Worker Management ---
@@ -96,56 +101,40 @@ class LsophApp(App[None]):
     def start_backend_worker(self):
         """Starts the background worker to run the backend's async method."""
         if self._backend_worker and self._backend_worker.state == WorkerState.RUNNING:
-            log.warning("Backend worker already running.")
+            # log.warning("Backend worker already running.") # Reduce noise
             return
         worker_name = f"backend_{self.backend_instance.__class__.__name__}"
         log.info(f"Starting worker '{worker_name}' to run backend coroutine...")
         self._backend_worker = self.run_worker(
-            self.backend_coroutine,  # The async function to run
+            self.backend_coroutine,
             name=worker_name,
             group="backend_workers",
             description=f"Running {self.backend_instance.__class__.__name__} backend...",
-            exclusive=True,  # Ensure only one backend worker runs
+            exclusive=True,
         )
-        # Check if worker creation failed immediately (rare)
         if not self._backend_worker:
             log.error(f"Failed to create worker {worker_name}")
             self.notify("Error starting backend worker!", severity="error", timeout=5)
             return
-
         log.info(
             f"Worker {self._backend_worker.name} created with state {self._backend_worker.state}"
         )
 
     async def cancel_backend_worker(self):
         """Signals the backend instance to stop and cancels the Textual worker."""
-        # 1. Signal the backend instance itself to stop its internal loops/processes
-        if (
-            not self._backend_stop_signalled
-        ):  # Prevent multiple signals if called rapidly
+        if not self._backend_stop_signalled:
             log.debug("Calling backend_instance.stop()...")
             await self.backend_instance.stop()
-            self._backend_stop_signalled = True  # Mark that we've signalled stop
+            self._backend_stop_signalled = True
             log.debug("Backend_instance.stop() returned.")
-
-        # 2. Cancel the Textual worker managing the coroutine
-        worker = self._backend_worker  # Use local variable for safety
+        worker = self._backend_worker
         if worker and worker.state == WorkerState.RUNNING:
             log.info(f"Requesting cancellation for Textual worker {worker.name}...")
             try:
                 await worker.cancel()
                 log.info(f"Textual worker {worker.name} cancellation requested.")
             except Exception as e:
-                # Log error but continue, backend stop signal is more critical
                 log.error(f"Error cancelling Textual worker {worker.name}: {e}")
-        elif worker:
-            log.debug(
-                f"Textual backend worker {worker.name} not running (state: {worker.state}). No Textual cancellation needed."
-            )
-        else:
-            log.debug("No Textual backend worker instance to cancel.")
-
-        # 3. Clear the worker reference after handling
         self._backend_worker = None
 
     # --- App Lifecycle ---
@@ -154,16 +143,11 @@ class LsophApp(App[None]):
         """Called when the app screen is mounted."""
         log.info("LsophApp mounting...")
         try:
-            # Store reference to the table widget
             self._file_table = self.query_one(FileDataTable)
-            # No need to add columns here, widget does it in its on_mount
-            # Initial data update will be triggered by check_monitor_version -> watch
             self._file_table.focus()
             log.debug("FileDataTable focused on mount.")
         except Exception as e:
             log.exception(f"Error getting FileDataTable on mount: {e}")
-
-        # Start the backend worker and the UI update timer
         self.start_backend_worker()
         self.set_interval(self._update_interval, self.check_monitor_version)
         log.info("UI Mounted, update timer started, backend worker started.")
@@ -171,23 +155,15 @@ class LsophApp(App[None]):
     async def on_unmount(self) -> None:
         """Called when the app is unmounted (e.g., on quit)."""
         log.info("LsophApp unmounting. Cancelling backend worker...")
-        # Ensure backend worker is stopped cleanly on exit
         await self.cancel_backend_worker()
 
     # --- Reactive Watchers ---
 
     def watch_last_monitor_version(self, old_version: int, new_version: int) -> None:
         """Triggers table update when monitor version changes."""
-        # Ensure table exists before trying to update
         if not self._file_table:
-            log.warning("Monitor version changed, but file table widget not ready.")
             return
-
         if new_version > old_version:
-            log.debug(
-                f"Monitor version changed ({old_version} -> {new_version}), calling table update."
-            )
-            # Get sorted data from monitor
             all_files = list(self.monitor)
             active_files = [
                 info
@@ -195,23 +171,19 @@ class LsophApp(App[None]):
                 if info.path not in self.monitor.ignored_paths
             ]
             active_files.sort(key=lambda info: info.last_activity_ts, reverse=True)
-            # Pass data to the widget's update method
             self._file_table.update_data(active_files)
-            # Update status bar here as well, after table update initiated
             self.update_status(
                 f"Tracking {len(active_files)} files. Ignored: {len(self.monitor.ignored_paths)}. Monitor v{new_version}"
             )
 
     def watch_status_text(self, old_text: str, new_text: str) -> None:
         """Updates the status bar widget when status_text changes."""
-        if self.is_mounted:  # Ensure widgets exist
+        if self.is_mounted:
             try:
-                # Query for the status bar widget by ID
                 status_bars = self.query("#status-bar")
                 if status_bars:
                     status_bars.first(Static).update(new_text)
             except Exception as e:
-                # Log warning if update fails, but don't crash UI
                 log.warning(f"Could not update status bar via watcher: {e}")
 
     # --- Update Logic ---
@@ -219,7 +191,6 @@ class LsophApp(App[None]):
     def check_monitor_version(self):
         """Periodically checks the monitor's version and worker status."""
         worker = self._backend_worker
-        # Check if worker stopped unexpectedly (logic remains the same)
         if (
             worker
             and worker.state != WorkerState.RUNNING
@@ -229,32 +200,46 @@ class LsophApp(App[None]):
             self._backend_stopped_notified = True
             status_msg = f"Error: Monitoring backend stopped unexpectedly!"
             log_msg = f"Backend worker {worker.name} stopped unexpectedly (state: {worker.state})."
-            severity = "error"
             log.error(log_msg + " Check previous logs for potential errors.")
             self.update_status(status_msg)
             self.notify(
                 f"{status_msg} Check logs for details.",
                 title="Backend Stopped Unexpectedly",
-                severity=severity,
+                severity="error",
                 timeout=10,
             )
             self._backend_worker = None
-
-        # Check monitor version and update reactive variable IF it changed
         current_version = self.monitor.version
         if current_version != self.last_monitor_version:
-            # Update reactive variable, which triggers watch_last_monitor_version
             self.last_monitor_version = current_version
 
     def update_status(self, text: str):
         """Helper method to update the reactive status_text variable."""
         self.status_text = text
 
-    # REMOVED update_table method - logic moved to FileDataTable and watcher
-
     # --- Event Handlers ---
 
-    # Removed on_data_table_row_selected - handled by action_show_detail check
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Handle row selection (Enter key) - show details."""
+        # Check if the event came from the main file table
+        if event.control is self._file_table:
+            log.debug(
+                f"DataTable Row Selected (Enter) from main table: {event.row_key}"
+            )
+            # Call the internal method directly, bypassing focus check
+            self._show_detail_for_selected_row()
+        # else: log.debug("Ignoring row selection event from other source.")
+
+    def on_data_table_row_activated(self, event: "DataTable.RowActivated") -> None:
+        """Handle row activation (Double Click) - show details."""
+        # Check if the event came from the main file table
+        if event.control is self._file_table:
+            log.debug(
+                f"DataTable Row Activated (Double Click) from main table: {event.row_key}"
+            )
+            # Call the internal method directly, bypassing focus check
+            self._show_detail_for_selected_row()
+        # else: log.debug("Ignoring row activation event from other source.")
 
     # --- Actions ---
 
@@ -264,98 +249,118 @@ class LsophApp(App[None]):
         await self.cancel_backend_worker()
         self.exit()
 
-    # REMOVED _get_selected_path - use self._file_table.selected_path instead
+    def _ensure_table_focused(self) -> bool:
+        """Checks if the file table exists and is focused."""
+        if not self._file_table:
+            return False
+        # Check if the table itself or one of its descendants has focus
+        # Also check if the main app screen is the current one
+        if self.screen is not self:
+            return False
+        if not self._file_table.has_focus and not self.focused_descendant_is_widget(
+            self._file_table
+        ):
+            return False
+        return True
 
     def action_ignore_selected(self) -> None:
         """Action to ignore the currently selected file path."""
-        if not self._file_table or not self._file_table.has_focus:
-            log.debug("Ignore selected action ignored: Table not focused or not ready.")
+        # Added screen check in _ensure_table_focused
+        if not self._ensure_table_focused():
             return
 
-        path_to_ignore = self._file_table.selected_path  # Use widget property
+        path_to_ignore = self._file_table.selected_path
         if not path_to_ignore:
             self.notify("No row selected.", severity="warning", timeout=2)
             return
 
         log.info(f"Ignoring selected path: {path_to_ignore}")
-        try:
-            # No need to manage cursor index here, widget handles it in update_data
-            self.monitor.ignore(path_to_ignore)
-            # Monitor version change will trigger table update via watcher
-            self.notify(f"Ignored: {short_path(path_to_ignore, 60)}", timeout=2)
-        except Exception as e:
-            log.exception("Error ignoring selected.")
-            self.notify(f"Error ignoring file: {e}", severity="error")
-
-    # REMOVED _move_cursor_after_ignore - handled by widget
+        self.monitor.ignore(path_to_ignore)
+        self.notify(f"Ignored: {short_path(path_to_ignore, 60)}", timeout=2)
 
     def action_ignore_all(self) -> None:
         """Action to ignore all currently tracked files."""
-        if not self._file_table or not self._file_table.has_focus:
-            log.debug("Ignore all action ignored: Table not focused or not ready.")
+        # Added screen check in _ensure_table_focused
+        if not self._ensure_table_focused():
             return
 
         log.info("Ignoring all tracked files.")
-        try:
-            count_before = len(
-                [fi for fi in self.monitor if fi.path not in self.monitor.ignored_paths]
-            )
-            if count_before == 0:
-                self.notify("No active files to ignore.", timeout=2)
-                return
-            self.monitor.ignore_all()
-            # Monitor version change will trigger table update via watcher
-            self.notify(f"Ignoring {count_before} currently tracked files.", timeout=2)
-        except Exception as e:
-            log.exception("Error ignoring all.")
-            self.notify(f"Error ignoring all files: {e}", severity="error")
-
-    # REMOVED _move_cursor_after_ignore_all - handled by widget
+        count_before = len(
+            [fi for fi in self.monitor if fi.path not in self.monitor.ignored_paths]
+        )
+        if count_before == 0:
+            self.notify("No active files to ignore.", timeout=2)
+            return
+        self.monitor.ignore_all()
+        self.notify(f"Ignoring {count_before} currently tracked files.", timeout=2)
 
     def action_show_log(self) -> None:
         """Action to show or hide the log screen."""
-        # (Logic remains the same)
+        # This action is global, no screen check needed here
         is_log_screen_active = isinstance(self.screen, LogScreen)
         if is_log_screen_active:
             self.pop_screen()
-            log.debug("Popped LogScreen.")
         else:
-            log.info("Action: show_log triggered. Pushing LogScreen.")
             self.push_screen(LogScreen(self.log_queue))
 
+    # This action is bound to 'i' and requires focus check
     def action_show_detail(self) -> None:
-        """Shows the detail screen for the selected row."""
-        if not self._file_table or not self._file_table.has_focus:
-            log.debug("Show detail action ignored: Table not focused or not ready.")
+        """Shows the detail screen for the selected row (requires focus)."""
+        # Added screen check in _ensure_table_focused
+        if not self._ensure_table_focused():
             return
+        self._show_detail_for_selected_row()
 
-        path = self._file_table.selected_path  # Use widget property
+    # Internal method without focus check, called by event handlers and action_show_detail
+    def _show_detail_for_selected_row(self) -> None:
+        """Core logic to show detail screen for the current selection."""
+        if not self._file_table:
+            return  # Should not happen if called correctly
+
+        path = self._file_table.selected_path
         if not path:
-            self.notify("No row selected.", severity="warning", timeout=2)
+            log.debug("_show_detail_for_selected_row called but no path selected.")
             return
 
         log.debug(f"Showing details for selected path: {path}")
         try:
             file_info = self.monitor.files.get(path)
             if file_info:
-                log.debug(f"Found FileInfo, pushing DetailScreen for {path}")
                 self.push_screen(DetailScreen(file_info))
             else:
-                log.warning(
-                    f"File '{path}' (from selected row) not found in monitor state."
-                )
-                self.notify(
-                    "File state not found (may have changed).",
-                    severity="warning",
-                    timeout=3,
-                )
+                log.warning(f"File '{path}' not found in monitor state.")
+                self.notify("File state not found.", severity="warning", timeout=3)
         except Exception as e:
             log.exception(f"Error pushing DetailScreen for path: {path}")
             self.notify(f"Error showing details: {e}", severity="error")
 
+    def action_scroll_home(self) -> None:
+        """Scrolls the file table to the top."""
+        # Add screen check
+        if self.screen is not self or not self._file_table:
+            return
+        log.debug("Action: scroll_home")
+        self._file_table.scroll_home(animate=False)
+        if self._file_table.row_count > 0:
+            self._file_table.move_cursor(row=0, animate=False)
+
+    def action_scroll_end(self) -> None:
+        """Scrolls the file table to the bottom."""
+        # Add screen check
+        if self.screen is not self or not self._file_table:
+            return
+        log.debug("Action: scroll_end")
+        self._file_table.scroll_end(animate=False)
+        if self._file_table.row_count > 0:
+            self._file_table.move_cursor(
+                row=self._file_table.row_count - 1, animate=False
+            )
+
     def action_dump_monitor(self) -> None:
         """Debug action to dump monitor state to log."""
-        # (Logic remains the same)
+        # This is a debug action, likely okay without screen check, but added for consistency
+        if self.screen is not self:
+            return
         log.debug("--- Monitor State Dump ---")
         try:
             log.debug(f"Identifier: {self.monitor.identifier}")
@@ -367,6 +372,7 @@ class LsophApp(App[None]):
                 f"PID->FD Map ({len(self.monitor.pid_fd_map)} pids): {self.monitor.pid_fd_map!r}"
             )
             log.debug(f"Files Dict ({len(self.monitor.files)} items):")
+            # Use monitor's __iter__ for thread safety
             sorted_files = sorted(list(self.monitor), key=lambda f: f.path)
             for info in sorted_files:
                 log.debug(
