@@ -1,7 +1,7 @@
 [project]
 name = "lsoph"
 description = "use strace or lsof to peek at file events"
-version = "0.0.4"
+version = "0.0.5"
 authors = [
     { name = "Gareth Davidson", email = "gaz@bitplane.net" }
 ]
