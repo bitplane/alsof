@@ -3,13 +3,10 @@
 
 import logging
 import os
-from collections.abc import Callable  # Import Callable from collections.abc
+from collections.abc import Callable
+from typing import Any
 
-# Use Python 3.10+ style hints
-# Removed: from typing import Any, Callable, Dict, Optional, Union
-from typing import Any  # Keep Any for now
-
-from lsoph.backend.strace.parse import Syscall  # Import Syscall dataclass
+from lsoph.backend.strace.parse import Syscall
 from lsoph.monitor import Monitor
 
 # Import helpers from the new module
@@ -18,20 +15,16 @@ from . import helpers
 log = logging.getLogger(__name__)
 
 # Type alias for handler functions
-SyscallHandler = Callable[
-    [Syscall, Monitor, dict[int, str]], None
-]  # Use dict, Callable from collections.abc
+SyscallHandler = Callable[[Syscall, Monitor, dict[int, str]], None]
 
 # --- Syscall Handlers ---
 
 
-def _handle_open_creat(
-    event: Syscall, monitor: Monitor, cwd_map: dict[int, str]
-):  # Use dict
+def _handle_open_creat(event: Syscall, monitor: Monitor, cwd_map: dict[int, str]):
     """Handles open, openat, creat syscalls."""
     pid, success, timestamp = event.pid, event.error_name is None, event.timestamp
-    details: dict[str, Any] = {"syscall": event.syscall}  # Use dict
-    path: str | None = None  # Use | for Optional
+    details: dict[str, Any] = {"syscall": event.syscall}
+    path: str | None = None
 
     if event.syscall in ["open", "creat"]:
         path_arg = helpers.clean_path_arg(event.args[0] if event.args else None)
@@ -53,12 +46,10 @@ def _handle_open_creat(
         log.warning(f"Could not determine path for {event.syscall} event: {event!r}")
 
 
-def _handle_close(
-    event: Syscall, monitor: Monitor, cwd_map: dict[int, str]
-):  # Use dict
+def _handle_close(event: Syscall, monitor: Monitor, cwd_map: dict[int, str]):
     """Handles close syscall."""
     pid, success, timestamp = event.pid, event.error_name is None, event.timestamp
-    details: dict[str, Any] = {"syscall": event.syscall}  # Use dict
+    details: dict[str, Any] = {"syscall": event.syscall}
     # Ensure arg is string before parsing
     fd_arg_str = str(event.args[0]) if event.args else None
     fd_arg = helpers.parse_result_int(fd_arg_str) if fd_arg_str else None
@@ -69,12 +60,10 @@ def _handle_close(
         log.warning(f"Could not parse FD for close event: {event!r}")
 
 
-def _handle_read_write(
-    event: Syscall, monitor: Monitor, cwd_map: dict[int, str]
-):  # Use dict
+def _handle_read_write(event: Syscall, monitor: Monitor, cwd_map: dict[int, str]):
     """Handles read, write, pread64, pwrite64, readv, writev syscalls."""
     pid, success, timestamp = event.pid, event.error_name is None, event.timestamp
-    details: dict[str, Any] = {"syscall": event.syscall}  # Use dict
+    details: dict[str, Any] = {"syscall": event.syscall}
     # Ensure arg is string before parsing
     fd_arg_str = str(event.args[0]) if event.args else None
     fd_arg = helpers.parse_result_int(fd_arg_str) if fd_arg_str else None
@@ -86,9 +75,7 @@ def _handle_read_write(
     # Get path from monitor state based on FD
     path = monitor.get_path(pid, fd_arg)
     # If path is None here, it means the FD wasn't tracked (e.g., socket, pipe)
-    # We might still want to record the read/write attempt if needed,
-    # but currently Monitor methods expect a path. Decide if this needs change.
-    # For now, proceed only if path is known.
+    # Proceed only if path is known.
     if path is None:
         log.debug(
             f"Path for {event.syscall} on PID {pid} FD {fd_arg} is unknown, skipping monitor update."
@@ -105,11 +92,11 @@ def _handle_read_write(
         monitor.write(pid, fd_arg, path, success, timestamp, **details)
 
 
-def _handle_stat(event: Syscall, monitor: Monitor, cwd_map: dict[int, str]):  # Use dict
+def _handle_stat(event: Syscall, monitor: Monitor, cwd_map: dict[int, str]):
     """Handles access, stat, lstat, newfstatat syscalls."""
     pid, success, timestamp = event.pid, event.error_name is None, event.timestamp
-    details: dict[str, Any] = {"syscall": event.syscall}  # Use dict
-    path: str | None = None  # Use | for Optional
+    details: dict[str, Any] = {"syscall": event.syscall}
+    path: str | None = None
 
     if event.syscall in ["access", "stat", "lstat"]:
         path_arg = helpers.clean_path_arg(event.args[0] if event.args else None)
@@ -129,13 +116,11 @@ def _handle_stat(event: Syscall, monitor: Monitor, cwd_map: dict[int, str]):  # 
         log.warning(f"Could not determine path for {event.syscall} event: {event!r}")
 
 
-def _handle_delete(
-    event: Syscall, monitor: Monitor, cwd_map: dict[int, str]
-):  # Use dict
+def _handle_delete(event: Syscall, monitor: Monitor, cwd_map: dict[int, str]):
     """Handles unlink, unlinkat, rmdir syscalls."""
     pid, success, timestamp = event.pid, event.error_name is None, event.timestamp
-    details: dict[str, Any] = {"syscall": event.syscall}  # Use dict
-    path: str | None = None  # Use | for Optional
+    details: dict[str, Any] = {"syscall": event.syscall}
+    path: str | None = None
 
     if event.syscall in ["unlink", "rmdir"]:
         path_arg = helpers.clean_path_arg(event.args[0] if event.args else None)
@@ -155,14 +140,12 @@ def _handle_delete(
         log.warning(f"Could not determine path for {event.syscall} event: {event!r}")
 
 
-def _handle_rename(
-    event: Syscall, monitor: Monitor, cwd_map: dict[int, str]
-):  # Use dict
+def _handle_rename(event: Syscall, monitor: Monitor, cwd_map: dict[int, str]):
     """Handles rename, renameat, renameat2 syscalls."""
     pid, success, timestamp = event.pid, event.error_name is None, event.timestamp
-    details: dict[str, Any] = {"syscall": event.syscall}  # Use dict
-    old_path: str | None = None  # Use | for Optional
-    new_path: str | None = None  # Use | for Optional
+    details: dict[str, Any] = {"syscall": event.syscall}
+    old_path: str | None = None
+    new_path: str | None = None
 
     if event.syscall == "rename":
         old_path_arg = helpers.clean_path_arg(event.args[0] if event.args else None)
@@ -204,7 +187,6 @@ def _handle_rename(
 
 
 # --- Syscall Dispatcher ---
-# Use dict instead of Dict
 SYSCALL_HANDLERS: dict[str, SyscallHandler] = {
     "open": _handle_open_creat,
     "openat": _handle_open_creat,
@@ -232,13 +214,11 @@ SYSCALL_HANDLERS: dict[str, SyscallHandler] = {
 
 
 # --- CWD Update Logic ---
-def update_cwd(
-    pid: int, cwd_map: dict[int, str], monitor: Monitor, event: Syscall
-):  # Use dict
+def update_cwd(pid: int, cwd_map: dict[int, str], monitor: Monitor, event: Syscall):
     """Updates the CWD map based on chdir or fchdir syscalls."""
     success, timestamp = event.error_name is None, event.timestamp
-    details: dict[str, Any] = {"syscall": event.syscall}  # Use dict
-    new_cwd: str | None = None  # Use | for Optional
+    details: dict[str, Any] = {"syscall": event.syscall}
+    new_cwd: str | None = None
 
     if event.syscall == "chdir":
         path_arg = helpers.clean_path_arg(event.args[0] if event.args else None)

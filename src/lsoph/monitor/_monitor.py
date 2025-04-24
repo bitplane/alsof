@@ -1,59 +1,28 @@
-# Filename: src/lsoph/monitor.py
+# Filename: src/lsoph/monitor/_monitor.py
+"""
+Contains the Monitor class responsible for managing file access state.
+"""
+
 import logging
 import os
 import time
-from collections import deque
-from collections.abc import Iterator  # Import Iterator from collections.abc
-from dataclasses import dataclass, field
-
-# Use Python 3.10+ style hints
-# Removed: from collections.abc import Iterator
-# Removed: from typing import Any, Dict, Optional, Set, Tuple, Union
-from typing import Any  # Keep Any for now
+from collections.abc import Iterator
+from typing import Any
 
 from lsoph.util.versioned import Versioned, changes, waits
 
+# Import FileInfo from the sibling module
+from ._fileinfo import FileInfo
+
 # --- Setup Logging ---
-log = logging.getLogger("lsoph.monitor")
+log = logging.getLogger("lsoph.monitor")  # Use the same logger name
 
 # --- Constants ---
+# Constants related to standard streams, used by Monitor logic
 STDIN_PATH = "<STDIN>"
 STDOUT_PATH = "<STDOUT>"
 STDERR_PATH = "<STDERR>"
-STD_PATHS: set[str] = {STDIN_PATH, STDOUT_PATH, STDERR_PATH}  # Use set
-DEFAULT_EVENT_HISTORY_SIZE = 100
-DEFAULT_RECENT_EVENT_TYPES_SIZE = 5
-
-
-# --- File State Information ---
-@dataclass
-class FileInfo:
-    """Holds state information about a single tracked file."""
-
-    path: str
-    status: str = "unknown"  # e.g., unknown, open, closed, active, deleted, error
-    last_activity_ts: float = field(default_factory=time.time)
-    # Maps PID -> set of open FDs for that PID
-    open_by_pids: dict[int, set[int]] = field(default_factory=dict)  # Use dict, set
-    last_event_type: str = ""  # e.g., OPEN, CLOSE, READ, WRITE, STAT, DELETE, RENAME
-    last_error_enoent: bool = False  # True if last relevant op failed with ENOENT
-    # Stores last N successful event types (e.g., READ, WRITE)
-    recent_event_types: deque[str] = field(
-        default_factory=lambda: deque(maxlen=DEFAULT_RECENT_EVENT_TYPES_SIZE)
-    )
-    # Stores history of events (simplified)
-    event_history: deque[dict[str, Any]] = field(  # Use dict
-        default_factory=lambda: deque(maxlen=DEFAULT_EVENT_HISTORY_SIZE)
-    )
-    bytes_read: int = 0
-    bytes_written: int = 0
-    # Stores additional details from backend events (e.g., mode, source)
-    details: dict[str, Any] = field(default_factory=dict)  # Use dict
-
-    @property
-    def is_open(self) -> bool:
-        """Checks if any process currently holds this file open according to state."""
-        return bool(self.open_by_pids)
+STD_PATHS: set[str] = {STDIN_PATH, STDOUT_PATH, STDERR_PATH}
 
 
 # --- Monitor Class (Manages State for a Monitored Target) ---
@@ -67,19 +36,17 @@ class Monitor(Versioned):
     def __init__(self, identifier: str):
         super().__init__()
         self.identifier = identifier
-        self.ignored_paths: set[str] = set()  # Use set
+        self.ignored_paths: set[str] = set()
         # Maps PID -> {FD -> Path}
-        self.pid_fd_map: dict[int, dict[int, str]] = {}  # Use dict
+        self.pid_fd_map: dict[int, dict[int, str]] = {}
         # Maps Path -> FileInfo
-        self.files: dict[str, FileInfo] = {}  # Use dict
-        self.backend_pid: int | None = None  # Use | for Optional
+        self.files: dict[str, FileInfo] = {}
+        self.backend_pid: int | None = None
         log.info(f"Initialized Monitor for identifier: '{identifier}'")
 
     # --- Internal Helper Methods ---
 
-    def _get_or_create_fileinfo(
-        self, path: str, timestamp: float
-    ) -> FileInfo | None:  # Use | for Optional
+    def _get_or_create_fileinfo(self, path: str, timestamp: float) -> FileInfo | None:
         """Gets existing FileInfo or creates one. Returns None if ignored/invalid."""
         if not path or not isinstance(path, str):
             log.debug(f"Ignoring event for invalid path: {path!r}")
@@ -91,6 +58,7 @@ class Monitor(Versioned):
         # Get or create FileInfo entry
         if path not in self.files:
             log.debug(f"Creating new FileInfo for path: {path}")
+            # Use the imported FileInfo class
             self.files[path] = FileInfo(
                 path=path, last_activity_ts=timestamp, status="accessed"
             )
@@ -104,7 +72,7 @@ class Monitor(Versioned):
         event_type: str,
         success: bool,
         timestamp: float,
-        details: dict[str, Any],  # Use dict
+        details: dict[str, Any],
     ):
         """Adds a simplified event representation to the file's history deque."""
         # Create a simplified version of details, excluding potentially large data
@@ -124,9 +92,7 @@ class Monitor(Versioned):
             if not info.recent_event_types or info.recent_event_types[-1] != event_type:
                 info.recent_event_types.append(event_type)
 
-    def _update_pid_fd_map(
-        self, pid: int, fd: int, path: str | None
-    ):  # Use | for Optional
+    def _update_pid_fd_map(self, pid: int, fd: int, path: str | None):
         """Safely updates or removes entries in the pid_fd_map."""
         pid_map = self.pid_fd_map.get(pid)
         current_path = pid_map.get(fd) if pid_map else None
@@ -149,8 +115,8 @@ class Monitor(Versioned):
                     del self.pid_fd_map[pid]
                     log.debug(f"Removed empty FD map for PID {pid}")
 
-    @changes  # Added decorator as this method modifies state (FileInfo status, open_by_pids)
-    def _remove_fd(self, pid: int, fd: int) -> FileInfo | None:  # Use | for Optional
+    @changes  # Modifies state (FileInfo status, open_by_pids)
+    def _remove_fd(self, pid: int, fd: int) -> FileInfo | None:
         """
         Internal helper to remove an FD mapping for a PID and update FileInfo state.
         Handles removal from pid_fd_map and FileInfo.open_by_pids, and updates status.
@@ -216,7 +182,7 @@ class Monitor(Versioned):
         event_type: str,
         success: bool,
         timestamp: float,
-        details: dict[str, Any],  # Use dict
+        details: dict[str, Any],
     ):
         """Helper to apply common updates (history, details, errors) to FileInfo state."""
         info.last_activity_ts = timestamp
@@ -266,7 +232,7 @@ class Monitor(Versioned):
         if path in self.files:
             log.debug(f"Removing ignored path from active state: {path}")
             # Clean up FDs associated with this path across all PIDs
-            pids_fds_to_remove: list[tuple[int, int]] = []  # Use list, tuple
+            pids_fds_to_remove: list[tuple[int, int]] = []
             for pid, fd_map in self.pid_fd_map.items():
                 for fd, p in fd_map.items():
                     if p == path:
@@ -361,7 +327,7 @@ class Monitor(Versioned):
         self,
         pid: int,
         fd: int,
-        path: str | None,  # Use | for Optional
+        path: str | None,
         success: bool,
         timestamp: float,
         **details,
@@ -399,7 +365,7 @@ class Monitor(Versioned):
         self,
         pid: int,
         fd: int,
-        path: str | None,  # Use | for Optional
+        path: str | None,
         success: bool,
         timestamp: float,
         **details,
@@ -481,7 +447,7 @@ class Monitor(Versioned):
         log.info(f"Path '{path}' marked as deleted.")
 
         # Clean up associated state using the helper for each open FD
-        pids_fds_to_remove: list[tuple[int, int]] = []  # Use list, tuple
+        pids_fds_to_remove: list[tuple[int, int]] = []
         # Iterate over copies as _remove_fd modifies the structure
         for open_pid, open_fds in list(info.open_by_pids.items()):
             for open_fd in list(open_fds):
@@ -628,7 +594,7 @@ class Monitor(Versioned):
         self._finalize_update(new_info, "RENAME", success, timestamp, details_for_new)
 
         # Update pid_fd_map for all FDs that pointed to old_path
-        pids_fds_to_update: list[tuple[int, int]] = []  # Use list, tuple
+        pids_fds_to_update: list[tuple[int, int]] = []
         for map_pid, fd_map in self.pid_fd_map.items():
             for map_fd, map_path in fd_map.items():
                 if map_path == old_path:
@@ -683,7 +649,7 @@ class Monitor(Versioned):
     # --- Public Query/Access Methods ---
 
     @waits  # Decorator ensures thread safety (acquires lock)
-    def __iter__(self) -> Iterator[FileInfo]:  # Use Iterator from collections.abc
+    def __iter__(self) -> Iterator[FileInfo]:
         # Return a list copy for safe iteration if needed elsewhere,
         # though direct iteration might be fine with RLock if caller doesn't modify.
         # Let's return a list copy for safety.
@@ -705,7 +671,7 @@ class Monitor(Versioned):
         return len(self.files)
 
     @waits
-    def get_path(self, pid: int, fd: int) -> str | None:  # Use | for Optional
+    def get_path(self, pid: int, fd: int) -> str | None:
         """Retrieves the path for a PID/FD, handling standard streams."""
         path = self.pid_fd_map.get(pid, {}).get(fd)
         if path is not None:

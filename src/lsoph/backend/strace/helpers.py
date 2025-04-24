@@ -3,12 +3,9 @@
 
 import logging
 import os
+from typing import Any
 
-# Use Python 3.10+ style hints
-# Removed: from typing import Any, Dict, Optional, Union
-from typing import Any  # Keep Any for now
-
-# Import Monitor only for type hint if needed by resolve_path, otherwise remove
+# Import Monitor only for type hint if needed by resolve_path
 from lsoph.monitor import Monitor
 
 log = logging.getLogger(__name__)
@@ -16,7 +13,7 @@ log = logging.getLogger(__name__)
 # --- Parsing & Path Helpers ---
 
 
-def parse_result_int(result_str: str) -> int | None:  # Use | for Optional
+def parse_result_int(result_str: str) -> int | None:
     """Safely parses an integer result string from strace."""
     if not result_str or result_str == "?":
         return None
@@ -27,7 +24,7 @@ def parse_result_int(result_str: str) -> int | None:  # Use | for Optional
         return None
 
 
-def clean_path_arg(path_arg: Any) -> str | None:  # Use | for Optional
+def clean_path_arg(path_arg: Any) -> str | None:
     """Cleans and decodes path arguments from strace, handling quotes and escapes."""
     if not isinstance(path_arg, str) or not path_arg:
         return None
@@ -72,7 +69,7 @@ def clean_path_arg(path_arg: Any) -> str | None:  # Use | for Optional
 
 def parse_dirfd(
     dirfd_arg: str | None,
-) -> int | str | None:  # Use | for Optional and Union
+) -> int | str | None:
     """Parses the dirfd argument, handling AT_FDCWD."""
     if dirfd_arg is None:
         return None
@@ -89,11 +86,11 @@ def parse_dirfd(
 
 def resolve_path(
     pid: int,
-    path: str | None,  # Use | for Optional
-    cwd_map: dict[int, str],  # Use dict
+    path: str | None,
+    cwd_map: dict[int, str],
     monitor: Monitor,  # Monitor needed here to lookup dirfd paths
-    dirfd: int | str | None = None,  # Use | for Optional and Union
-) -> str | None:  # Use | for Optional
+    dirfd: int | str | None = None,
+) -> str | None:
     """Resolves a path argument relative to CWD or dirfd if necessary."""
     if path is None:
         return None
@@ -102,7 +99,7 @@ def resolve_path(
     if (path.startswith("<") and path.endswith(">")) or path.startswith("@"):
         return path
 
-    base_dir: str | None = None  # Use | for Optional
+    base_dir: str | None = None
 
     # Determine base directory based on dirfd
     if dirfd is not None:
@@ -122,11 +119,11 @@ def resolve_path(
                 # Cannot resolve relative path reliably, return original path
                 # If the path is absolute, it will be handled below anyway.
                 # If relative, returning it is the best we can do.
-                # return path # Let's allow absolute paths to still work below
+                # Let's allow absolute paths to still work below
         else:
             # Unhandled dirfd type (should not happen with _parse_dirfd)
             log.warning(f"Unhandled dirfd value: {dirfd!r} for PID {pid}")
-            # return path # Allow absolute paths to still work below
+            # Allow absolute paths to still work below
 
     # Resolve the path
     if os.path.isabs(path):

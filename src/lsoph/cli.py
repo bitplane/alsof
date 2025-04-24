@@ -6,11 +6,8 @@ import logging
 import os
 import shlex
 import sys
-from collections.abc import Callable, Coroutine  # Import from collections.abc
-
-# Use Python 3.10+ style hints
-# Removed: from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
-from typing import Any  # Keep Any for now
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 # Import backend modules AND their backend classes
 from lsoph.backend import lsof, psutil, strace
@@ -25,8 +22,8 @@ from lsoph.monitor import Monitor
 from lsoph.ui.app import LsophApp
 
 # --- Type Definitions ---
-BackendFactory = Callable[[Monitor], Backend]  # Use Callable from collections.abc
-BackendCoroutine = Coroutine[Any, Any, None]  # Use Coroutine from collections.abc
+BackendFactory = Callable[[Monitor], Backend]
+BackendCoroutine = Coroutine[Any, Any, None]
 
 # --- Logging Setup ---
 # Logging setup is handled by log.py
@@ -34,7 +31,6 @@ BackendCoroutine = Coroutine[Any, Any, None]  # Use Coroutine from collections.a
 
 # --- Argument Parsing ---
 # Map backend names to their class constructors
-# Use dict instead of Dict, Callable from collections.abc
 BACKEND_CONSTRUCTORS: dict[str, Callable[[Monitor], Backend]] = {
     "strace": StraceBackend,
     "lsof": LsofBackend,
@@ -46,7 +42,7 @@ DEFAULT_BACKEND = "lsof"
 
 def parse_arguments(
     argv: list[str] | None = None,
-) -> argparse.Namespace:  # Use | for Optional, list
+) -> argparse.Namespace:
     """Parses command-line arguments for lsoph."""
     parser = argparse.ArgumentParser(
         description="Monitors file access for a command or process using various backends.",
@@ -56,7 +52,7 @@ def parse_arguments(
         "Examples:\n"
         "  lsoph -p 1234 5678         # Attach to PIDs using default backend (lsof)\n"
         "  lsoph -b strace -- sleep 10 # Run 'sleep 10' using strace backend\n"
-        "  lsoph -b psutil -c find .   # Run 'find .' using psutil backend",  # Updated example
+        "  lsoph -b psutil -c find .   # Run 'find .' using psutil backend",
     )
     parser.add_argument(
         "-b",
@@ -103,14 +99,10 @@ def parse_arguments(
     return args
 
 
-# --- Backend Worker ---
-# No longer needed as worker logic is handled by Textual's run_worker
-
-
 # --- Main Application Logic ---
 
 
-def main(argv: list[str] | None = None) -> int:  # Use | for Optional, list
+def main(argv: list[str] | None = None) -> int:
     """
     Main entry point: Parses args, sets up logging, creates Monitor,
     instantiates backend, creates the specific backend coroutine,
@@ -133,8 +125,8 @@ def main(argv: list[str] | None = None) -> int:  # Use | for Optional, list
 
         # Determine mode (attach/run) and prepare arguments
         monitor_id: str
-        target_pids: list[int] | None = None  # Use | for Optional, list
-        target_command: list[str] | None = None  # Use | for Optional, list
+        target_pids: list[int] | None = None
+        target_command: list[str] | None = None
 
         if args.pids:
             target_pids = args.pids

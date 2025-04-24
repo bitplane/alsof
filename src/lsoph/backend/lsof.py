@@ -4,15 +4,9 @@ import logging
 import os
 import re
 import shutil
-import subprocess  # Still needed for DEVNULL potentially, though asyncio has it
+import subprocess  # Keep for DEVNULL if needed
 import time
-
-# Use Python 3.10+ style hints
-# Removed: from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Set, Tuple
-from collections.abc import (  # Import Iterator/AsyncIterator from collections.abc
-    AsyncIterator,
-    Iterator,
-)
+from collections.abc import AsyncIterator, Iterator
 
 from lsoph.monitor import Monitor
 from lsoph.util.pid import get_descendants  # Keep for descendant logic if needed
@@ -34,7 +28,7 @@ FD_TYPE_RE = re.compile(r"(\d+)([rwu])?")
 
 
 # --- Parsing Logic (remains synchronous) ---
-def _parse_fd(fd_str: str) -> tuple[int | None, str]:  # Use | for Optional
+def _parse_fd(fd_str: str) -> tuple[int | None, str]:
     """Parse the FD column from lsof output (field 'f')."""
     if fd_str in ("cwd", "rtd", "txt", "mem"):
         return None, fd_str
@@ -47,9 +41,9 @@ def _parse_fd(fd_str: str) -> tuple[int | None, str]:  # Use | for Optional
 
 def _parse_lsof_f_output(
     lines: Iterator[str],
-) -> Iterator[dict]:  # Use Iterator from collections.abc
+) -> Iterator[dict]:
     """Parses the output of `lsof -F pcftn`."""
-    current_record: dict[str, Any] = {}  # Use dict instead of Dict
+    current_record: dict[str, Any] = {}
     for line in lines:
         line = line.strip()
         if not line:
@@ -57,9 +51,7 @@ def _parse_lsof_f_output(
         field_type = line[0]
         value = line[1:]
         if field_type == "p":
-            # Yield previous record before starting a new one
-            # (Original logic might have missed the last record if 'n' wasn't the last field)
-            # Let's stick to the original logic where yield happens on 'n'
+            # Yield happens on 'n' field below
             current_record = {"pid": int(value)}
         elif field_type == "c":
             current_record["command"] = value
@@ -83,8 +75,8 @@ def _parse_lsof_f_output(
 
 # --- Async I/O Logic ---
 async def _run_lsof_command_async(
-    pids: list[int] | None = None,  # Use | for Optional, list instead of List
-) -> AsyncIterator[str]:  # Use AsyncIterator from collections.abc
+    pids: list[int] | None = None,
+) -> AsyncIterator[str]:
     """
     Runs the lsof command asynchronously and yields its raw standard output lines.
     """
@@ -94,8 +86,7 @@ async def _run_lsof_command_async(
     cmd = [lsof_path, "-n", "-F", "pcftn"]
     if pids:
         cmd.extend(["-p", ",".join(map(str, pids))])
-    # log.info(f"Running async lsof command: {' '.join(cmd)}") # Reduce noise
-    process: asyncio.subprocess.Process | None = None  # Use | for Optional
+    process: asyncio.subprocess.Process | None = None
     try:
         process = await asyncio.create_subprocess_exec(
             *cmd,
@@ -138,9 +129,7 @@ async def _run_lsof_command_async(
 
 
 # --- State Update Logic (synchronous) ---
-def _process_lsof_record(
-    record: dict, monitor: Monitor, timestamp: float
-) -> None:  # Use dict instead of Dict
+def _process_lsof_record(record: dict, monitor: Monitor, timestamp: float) -> None:
     """Process a single parsed lsof record and update the monitor state."""
     pid = record.get("pid")
     path = record.get("path")
@@ -164,13 +153,13 @@ def _process_lsof_record(
 
 
 async def _perform_lsof_poll_async(
-    pids_to_monitor: list[int],  # Use list instead of List
+    pids_to_monitor: list[int],
     monitor: Monitor,
-    seen_fds: dict[int, set[tuple[int, str]]],  # Use dict, set, tuple
-) -> dict[int, set[tuple[int, str]]]:  # Use dict, set, tuple
+    seen_fds: dict[int, set[tuple[int, str]]],
+) -> dict[int, set[tuple[int, str]]]:
     """Performs a single async poll cycle using lsof."""
     timestamp = time.time()
-    current_fds: dict[int, set[tuple[int, str]]] = {}  # Use dict, set, tuple
+    current_fds: dict[int, set[tuple[int, str]]] = {}
     record_count = 0
     lines_processed = 0
 
@@ -194,8 +183,6 @@ async def _perform_lsof_poll_async(
                 current_fds.setdefault(pid, set()).add((fd, path))
             _process_lsof_record(record, monitor, timestamp)  # Update monitor (sync)
 
-        # log.debug(f"Processed {record_count} lsof records from {lines_processed} lines.") # Reduce noise
-
     except (RuntimeError, FileNotFoundError) as e:
         log.error(f"Async lsof poll failed: {e}. Skipping state update.")
         return seen_fds  # Return previous state on error
@@ -209,10 +196,8 @@ async def _perform_lsof_poll_async(
         current_pid_fds = current_fds.get(pid, set())
         for fd, path in previous_fd_paths:
             if (fd, path) not in current_pid_fds:
-                # log.debug(f"Detected closed file via poll diff: PID {pid}, FD {fd}, Path {path}") # Reduce noise
                 monitor.close(pid, fd, True, timestamp, source="lsof_poll")
                 close_count += 1
-    # if close_count > 0: log.debug(f"Detected {close_count} closed files in this poll.") # Reduce noise
 
     return current_fds  # Return FDs seen in *this* cycle
 
@@ -230,7 +215,7 @@ class LsofBackend(Backend):
         self.poll_interval = poll_interval
         # State is managed within the run methods
 
-    async def attach(self, pids: list[int]):  # Use list instead of List
+    async def attach(self, pids: list[int]):
         """Implementation of the attach method."""
         if not pids:
             log.warning("LsofBackend.attach called with no PIDs.")
@@ -239,9 +224,9 @@ class LsofBackend(Backend):
         log.info(
             f"Starting lsof attach monitoring loop. PIDs: {pids}, Poll Interval: {self.poll_interval}s"
         )
-        monitored_pids: set[int] = set(pids)  # Use set instead of Set
-        seen_fds: dict[int, set[tuple[int, str]]] = {}  # Use dict, set, tuple
-        # track_descendants = False # Attach never tracks descendants
+        monitored_pids: set[int] = set(pids)
+        seen_fds: dict[int, set[tuple[int, str]]] = {}
+        # Attach never tracks descendants in this implementation
 
         try:
             while not self.should_stop:
@@ -279,8 +264,3 @@ class LsofBackend(Backend):
             log.info("Exiting lsof async attach loop.")
 
     # run_command is inherited from the base class
-
-
-# Remove old functional attach/run methods
-# def attach(...): ...
-# def run(...): ...

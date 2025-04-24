@@ -1,28 +1,21 @@
 #!/usr/bin/env python3
-
 # Filename: src/lsoph/util/pid.py
 
 import argparse
-import logging  # Keep logging import
+import logging
 import os
 import sys
 
 import psutil
 
-# Use Python 3.10+ style hints
-# Removed: from typing import List, Optional
+log = logging.getLogger(__name__)
 
 
-# --- Setup Logging ---
-# REMOVED: logging.basicConfig(...)
-log = logging.getLogger(__name__)  # Get logger instance
-
-
-def get_descendants(parent_pid: int) -> list[int]:  # Use list
+def get_descendants(parent_pid: int) -> list[int]:
     """
     Retrieves a list of all descendant process IDs (PIDs) for a given parent PID.
     """
-    descendant_pids: list[int] = []  # Use list
+    descendant_pids: list[int] = []
     try:
         parent = psutil.Process(parent_pid)
         descendant_procs = parent.children(recursive=True)
@@ -37,7 +30,7 @@ def get_descendants(parent_pid: int) -> list[int]:  # Use list
     return descendant_pids
 
 
-def get_cwd(pid: int) -> str | None:  # Use | for Optional
+def get_cwd(pid: int) -> str | None:
     """
     Retrieves the Current Working Directory (CWD) for a given PID.
 
@@ -87,7 +80,7 @@ def get_cwd(pid: int) -> str | None:  # Use | for Optional
 
 
 # --- Main Execution Function (for testing) ---
-def main(argv: list[str] | None = None) -> int:  # Use | for Optional, list
+def main(argv: list[str] | None = None) -> int:
     """
     Command-line entry point for testing pid functions.
     """

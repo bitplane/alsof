@@ -4,9 +4,6 @@
 import logging
 import os
 
-# Use Python 3.10+ style hints
-# No typing imports were used here.
-
 log = logging.getLogger(__name__)
 
 # Store CWD at import time. Let OSError propagate if this fails.

@@ -8,9 +8,6 @@ from abc import ABC, abstractmethod
 
 from lsoph.monitor import Monitor
 
-# Use Python 3.10+ style hints
-
-
 log = logging.getLogger("lsoph.backend.base")
 
 
@@ -60,20 +57,14 @@ class Backend(ABC):
             pid = process.pid
             log.info(f"Command '{' '.join(command)}' started with PID: {pid}")
 
-            # Create a task to run the attach method for the new PID
-            # We pass track_descendants=True implicitly by calling attach here
-            # within the run_command context. The attach implementation itself
-            # might need refinement to handle descendant tracking based on how it's called.
-            # For now, assume attach monitors the given PIDs.
-            # A cleaner way might be to have attach *always* just monitor given PIDs,
-            # and the run_command loop handle descendant discovery if needed,
-            # but let's stick to calling attach for now.
+            # Create a task to run the attach method for the new PID.
+            # Backends implementing attach should handle descendant tracking if appropriate.
             attach_task = asyncio.create_task(
                 self.attach([pid]), name=f"attach_task_{pid}"
             )
 
             # Wait for either the attach task to complete (e.g., cancellation)
-            # or the monitored process to exit.
+            # or the monitored process to exit, or the stop event.
             process_wait_task = asyncio.create_task(
                 process.wait(), name=f"process_wait_{pid}"
             )

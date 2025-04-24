@@ -4,19 +4,14 @@ import logging
 import os
 import subprocess
 import time
-
-# Use Python 3.10+ style hints
-# Removed: from typing import Any, Dict, List, Optional, Set, Tuple
-from typing import Any  # Keep Any for now
+from typing import Any
 
 import psutil
 
 from lsoph.monitor import Monitor
 
-# Import updated base class
 from .base import Backend
 
-# Setup logging
 log = logging.getLogger("lsoph.backend.psutil")
 
 # --- Constants ---
@@ -24,9 +19,7 @@ DEFAULT_PSUTIL_POLL_INTERVAL = 0.5
 
 
 # --- Helper Functions (remain synchronous as psutil is sync) ---
-# _get_process_info, _get_process_cwd, _get_process_open_files, _get_process_descendants
-# remain the same.
-def _get_process_info(pid: int) -> psutil.Process | None:  # Use | for Optional
+def _get_process_info(pid: int) -> psutil.Process | None:
     """Safely get a psutil.Process object."""
     try:
         return psutil.Process(pid)
@@ -37,7 +30,7 @@ def _get_process_info(pid: int) -> psutil.Process | None:  # Use | for Optional
         return None
 
 
-def _get_process_cwd(proc: psutil.Process) -> str | None:  # Use | for Optional
+def _get_process_cwd(proc: psutil.Process) -> str | None:
     """Safely get the current working directory."""
     try:
         return proc.cwd()
@@ -53,9 +46,9 @@ def _get_process_cwd(proc: psutil.Process) -> str | None:  # Use | for Optional
 
 def _get_process_open_files(
     proc: psutil.Process,
-) -> list[dict[str, Any]]:  # Use list, dict
+) -> list[dict[str, Any]]:
     """Safely get open files and connections for a process."""
-    open_files_data: list[dict[str, Any]] = []  # Use list, dict
+    open_files_data: list[dict[str, Any]] = []
     pid = proc.pid
     try:  # Get regular files
         for f in proc.open_files():
@@ -125,7 +118,7 @@ def _get_process_open_files(
 
 def _get_process_descendants(
     proc: psutil.Process,
-) -> list[int]:  # Use list instead of List
+) -> list[int]:
     """Safely get all descendant PIDs."""
     try:
         # Use list comprehension directly
@@ -158,16 +151,14 @@ class PsutilBackend(Backend):
         self,
         pid: int,
         proc: psutil.Process | None,
-        pid_cwd_cache: dict,  # Use | for Optional, dict
+        pid_cwd_cache: dict,
     ):
         """Updates the CWD cache if the PID is not already present."""
         if proc and pid not in pid_cwd_cache:
             cwd = _get_process_cwd(proc)
             pid_cwd_cache[pid] = cwd  # Store None if CWD retrieval failed
 
-    def _resolve_path(
-        self, pid: int, path: str, pid_cwd_cache: dict
-    ) -> str:  # Use dict
+    def _resolve_path(self, pid: int, path: str, pid_cwd_cache: dict) -> str:
         """Resolves a relative path using the cached CWD."""
         # Check for absolute paths (Unix/Windows) or special markers
         if path.startswith(("/", "<")) or (len(path) > 1 and path[1] == ":"):
@@ -189,11 +180,11 @@ class PsutilBackend(Backend):
         pid: int,
         proc: psutil.Process,
         timestamp: float,
-        pid_cwd_cache: dict,  # Use dict
-        seen_fds: dict,  # Use dict
-    ) -> set[int]:  # Use set instead of Set
+        pid_cwd_cache: dict,
+        seen_fds: dict,
+    ) -> set[int]:
         """Processes open files for a single PID, updating monitor state."""
-        current_pid_fds: set[int] = set()  # Use set instead of Set
+        current_pid_fds: set[int] = set()
         open_files_data = _get_process_open_files(proc)
 
         for file_info in open_files_data:
@@ -267,7 +258,7 @@ class PsutilBackend(Backend):
         pid: int,
         current_pid_fds: set[int],
         timestamp: float,
-        seen_fds: dict,  # Use set, dict
+        seen_fds: dict,
     ):
         """Detects and reports closed FDs by comparing current and previous state."""
         if pid not in seen_fds:
@@ -293,12 +284,12 @@ class PsutilBackend(Backend):
 
     def _poll_cycle(
         self,
-        monitored_pids: set[int],  # Use set
-        pid_exists_status: dict,  # Use dict
-        pid_cwd_cache: dict,  # Use dict
-        seen_fds: dict,  # Use dict
+        monitored_pids: set[int],
+        pid_exists_status: dict,
+        pid_cwd_cache: dict,
+        seen_fds: dict,
         track_descendants: bool,
-    ) -> set[int]:  # Return set
+    ) -> set[int]:
         """
         Performs a single polling cycle.
         Accepts state dictionaries as arguments and returns updated monitored_pids.
@@ -381,25 +372,21 @@ class PsutilBackend(Backend):
             for pid in pids_to_remove:
                 pid_cwd_cache.pop(pid, None)
                 seen_fds.pop(pid, None)
-                # pid_exists_status.pop(pid, None) # Keep False status for future checks
+                # Keep False status in pid_exists_status for future checks
 
         return monitored_pids  # Return the updated set
 
-    async def _run_loop(
-        self, initial_pids: list[int], track_descendants: bool
-    ):  # Use list
+    async def _run_loop(self, initial_pids: list[int], track_descendants: bool):
         """The core async monitoring loop, shared by attach and run_command."""
         log.info(
             f"Starting psutil monitoring loop. Initial PIDs: {initial_pids}, Track Descendants: {track_descendants}"
         )
 
         # --- State Management within the loop ---
-        monitored_pids: set[int] = set(initial_pids)  # Use set
-        pid_exists_status: dict[int, bool] = {
-            pid: True for pid in initial_pids
-        }  # Use dict
-        pid_cwd_cache: dict[int, str | None] = {}  # Use dict, | for Optional
-        seen_fds: dict[int, dict[int, tuple[str, bool, bool]]] = {}  # Use dict, tuple
+        monitored_pids: set[int] = set(initial_pids)
+        pid_exists_status: dict[int, bool] = {pid: True for pid in initial_pids}
+        pid_cwd_cache: dict[int, str | None] = {}
+        seen_fds: dict[int, dict[int, tuple[str, bool, bool]]] = {}
         # Initial CWD cache population
         for pid in initial_pids:
             proc = _get_process_info(pid)
@@ -448,7 +435,7 @@ class PsutilBackend(Backend):
                 f"Exiting psutil async {('attach' if not track_descendants else 'run')} loop."
             )
 
-    async def attach(self, pids: list[int]):  # Use list
+    async def attach(self, pids: list[int]):
         """Implementation of the attach method."""
         if not pids:
             log.warning("PsutilBackend.attach called with no PIDs.")

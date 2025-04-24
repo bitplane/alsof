@@ -4,13 +4,9 @@
 import asyncio
 import logging
 import time
-
-# Use Python 3.10+ style hints
 from collections import deque
-from collections.abc import Callable, Coroutine  # Import from collections.abc
-
-# Removed: from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
-from typing import Any  # Keep Any for now
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -23,10 +19,7 @@ from textual.widgets import DataTable, Footer, Header, Static
 from textual.widgets.data_table import CellKey, RowKey
 from textual.worker import Worker, WorkerState
 
-# Import the corrected base backend class
 from lsoph.backend.base import Backend
-
-# Import FileInfo for type hinting
 from lsoph.monitor import FileInfo, Monitor
 from lsoph.util.short_path import short_path
 
@@ -34,16 +27,15 @@ from .detail_screen import DetailScreen
 from .log_screen import LogScreen
 
 # Type alias for the backend coroutine (attach or run_command)
-BackendCoroutine = Coroutine[Any, Any, None]  # Use Coroutine from collections.abc
+BackendCoroutine = Coroutine[Any, Any, None]
 
 log = logging.getLogger("lsoph.ui.app")
 
 
 # --- Helper Functions for Table Update ---
-# _format_file_info_for_table remains the same
 def _format_file_info_for_table(
     info: FileInfo, available_width: int, current_time: float
-) -> tuple[str, Text, Text, Text, Text]:  # Use tuple
+) -> tuple[str, Text, Text, Text, Text]:
     """Formats FileInfo into data suitable for DataTable.add_row."""
     emoji = " "
     # Determine emoji based on status and recent activity
@@ -72,7 +64,6 @@ def _format_file_info_for_table(
             emoji = "🔄"  # Recently renamed
         elif info.event_history:
             emoji = "❔"  # Some history, but none of the above
-        # else: emoji remains " " (e.g., unknown, accessed with no specific event)
 
     # Format activity string (bytes or status)
     activity_str = ""
@@ -149,9 +140,9 @@ class LsophApp(App[None]):
     def __init__(
         self,
         monitor: Monitor,
-        log_queue: deque,  # Use deque directly
+        log_queue: deque,
         backend_instance: Backend,
-        backend_coroutine: BackendCoroutine,  # Use type alias
+        backend_coroutine: BackendCoroutine,
     ):
         super().__init__()
         self.monitor = monitor
@@ -159,7 +150,7 @@ class LsophApp(App[None]):
         self.backend_instance = backend_instance
         self.backend_coroutine = backend_coroutine
         self._update_interval = 0.5  # Interval for checking monitor version
-        self._backend_worker: Worker | None = None  # Use | for Optional
+        self._backend_worker: Worker | None = None
         self._backend_stop_signalled = False  # Flag to track if stop was requested
         self._backend_stopped_notified = False  # Flag to prevent repeated notifications
 
@@ -246,7 +237,7 @@ class LsophApp(App[None]):
         self.set_interval(self._update_interval, self.check_monitor_version)
         log.info("UI Mounted, update timer started, backend worker started.")
 
-    async def on_unmount(self) -> None:  # Make async
+    async def on_unmount(self) -> None:
         """Called when the app is unmounted (e.g., on quit)."""
         log.info("LsophApp unmounting. Cancelling backend worker...")
         # Ensure backend worker is stopped cleanly on exit
@@ -349,17 +340,13 @@ class LsophApp(App[None]):
         active_files.sort(key=lambda info: info.last_activity_ts, reverse=True)
 
         # --- Preserve Cursor Position ---
-        selected_row_key: RowKey | None = None  # Use | for Optional
+        selected_row_key: RowKey | None = None
         current_cursor_row_index = -1
         try:
-            coordinate: Coordinate | None = (
-                table.cursor_coordinate
-            )  # Use | for Optional
+            coordinate: Coordinate | None = table.cursor_coordinate
             if coordinate and table.is_valid_coordinate(coordinate):
                 current_cursor_row_index = coordinate.row
-                cell_key: CellKey | None = table.coordinate_to_cell_key(
-                    coordinate
-                )  # Use | for Optional
+                cell_key: CellKey | None = table.coordinate_to_cell_key(coordinate)
                 selected_row_key = cell_key.row_key if cell_key else None
         except Exception as e:
             log.debug(f"Error getting cursor state: {e}")
@@ -367,8 +354,8 @@ class LsophApp(App[None]):
 
         # --- Update Table Rows ---
         table.clear()  # Clear existing rows
-        row_keys_added_this_update: set[RowKey] = set()  # Use set
-        new_row_key_to_index_map: dict[RowKey, int] = {}  # Use dict
+        row_keys_added_this_update: set[RowKey] = set()
+        new_row_key_to_index_map: dict[RowKey, int] = {}
         for idx, info in enumerate(active_files):
             # Format data for the row
             row_key_value, emoji, activity, path, age = _format_file_info_for_table(
@@ -426,23 +413,21 @@ class LsophApp(App[None]):
 
     # --- Actions ---
 
-    async def action_quit(self) -> None:  # Make async
+    async def action_quit(self) -> None:
         """Action to quit the application."""
         log.info("Quit action triggered. Signalling backend worker and exiting.")
         # Ensure backend is stopped before exiting
         await self.cancel_backend_worker()
         self.exit()  # Request app exit
 
-    def _get_selected_path(self) -> str | None:  # Use | for Optional
+    def _get_selected_path(self) -> str | None:
         """Helper to get the path string from the currently selected row."""
         try:
             table = self.query_one(DataTable)
             coordinate = table.cursor_coordinate
             if not table.is_valid_coordinate(coordinate):
                 return None
-            cell_key: CellKey | None = table.coordinate_to_cell_key(
-                coordinate
-            )  # Use | for Optional
+            cell_key: CellKey | None = table.coordinate_to_cell_key(coordinate)
             row_key_obj = cell_key.row_key if cell_key else None
             # The row key's value *is* the path string we set
             if row_key_obj is not None and row_key_obj.value is not None:
@@ -576,7 +561,6 @@ class LsophApp(App[None]):
                 log.debug(
                     f"  {info.path}: Status={info.status}, Open={info.is_open}, R/W={info.bytes_read}/{info.bytes_written}, Last={info.last_event_type}, PIDs={list(info.open_by_pids.keys())}"
                 )
-                # log.debug(f"  {info.path}: {info!r}") # Alternative: log full repr
             log.debug("--- End Monitor State Dump ---")
             self.notify("Monitor state dumped to log (debug level).")
         except Exception as e:

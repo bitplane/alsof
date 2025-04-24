@@ -3,17 +3,14 @@
 
 import datetime
 import logging
-
-# Use Python 3.10+ style hints
-# Removed: from typing import Any, Dict
-from typing import Any  # Keep Any for now
+from typing import Any
 
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical  # Use Vertical for simple layout
-from textual.screen import Screen  # Changed from ModalScreen to Screen
-from textual.widgets import Footer, Header, RichLog, Static  # Added Header, Footer
+from textual.containers import Vertical
+from textual.screen import Screen
+from textual.widgets import Footer, Header, RichLog, Static
 
 from lsoph.monitor import FileInfo
 from lsoph.util.short_path import short_path
@@ -21,7 +18,7 @@ from lsoph.util.short_path import short_path
 log = logging.getLogger("lsoph.ui.detail")
 
 
-class DetailScreen(Screen):  # Changed base class to Screen
+class DetailScreen(Screen):
     """Screen to display event history and details for a specific file."""
 
     BINDINGS = [
@@ -35,8 +32,6 @@ class DetailScreen(Screen):  # Changed base class to Screen
         Binding("end", "scroll_end()", "Scroll End", show=False),
     ]
 
-    # No CSS needed here if it's defined in app.css or using default layout
-
     def __init__(self, file_info: FileInfo):
         self.file_info = file_info
         super().__init__()
@@ -45,14 +40,13 @@ class DetailScreen(Screen):  # Changed base class to Screen
         """Create child widgets for the detail screen."""
         yield Header()
         # Use a Vertical container to stack the header and log
-        # This allows the RichLog to take remaining space
         with Vertical(id="detail-content"):
             yield Static(self._create_header_text(), id="detail-header")
             yield RichLog(
                 id="event-log",
                 max_lines=2000,  # Limit stored lines for performance
                 markup=True,  # Enable Rich markup
-                highlight=True,  # Enable syntax highlighting (though limited relevance here)
+                highlight=True,  # Enable syntax highlighting
                 wrap=False,  # Disable wrapping for log lines
                 auto_scroll=True,  # Keep scrolled to bottom initially
             )
@@ -80,8 +74,7 @@ class DetailScreen(Screen):  # Changed base class to Screen
         """Called when the screen is mounted. Populates the log."""
         try:
             log_widget = self.query_one(RichLog)
-            # Update the static header widget as well, in case state changed
-            # while the screen was being pushed
+            # Update the static header widget as well
             self.query_one("#detail-header", Static).update(self._create_header_text())
 
             history = self.file_info.event_history
@@ -136,7 +129,7 @@ class DetailScreen(Screen):  # Changed base class to Screen
                 result_padded = f"{result_markup}{padding}"  # Pad
 
                 # Format details dictionary
-                details_dict: dict[str, Any] = event.get("details", {})  # Use dict
+                details_dict: dict[str, Any] = event.get("details", {})
                 # Filter out redundant/internal keys
                 filtered_details = {
                     k: v

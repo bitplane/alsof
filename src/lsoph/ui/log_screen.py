@@ -7,20 +7,15 @@ from collections import deque
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-
-# Use Python 3.10+ style hints
-# Removed Container import
-from textual.containers import (
-    VerticalScroll,  # Keep VerticalScroll if needed for the log widget itself; This seems unused, consider removing if not needed
-)
-from textual.screen import Screen  # Changed from ModalScreen to Screen
-from textual.timer import Timer  # Import Timer type for _timer attribute
-from textual.widgets import Footer, Header, RichLog, Static  # Added Header, Footer
+from textual.containers import VerticalScroll  # Keep if needed by RichLog internally
+from textual.screen import Screen
+from textual.timer import Timer
+from textual.widgets import Footer, Header, RichLog, Static
 
 log = logging.getLogger("lsoph.ui.log")
 
 
-class LogScreen(Screen):  # Changed base class to Screen
+class LogScreen(Screen):
     """A full screen to display application logs using RichLog."""
 
     BINDINGS = [
@@ -35,11 +30,9 @@ class LogScreen(Screen):  # Changed base class to Screen
         Binding("end", "scroll_end()", "Scroll End", show=False),
     ]
 
-    # No CSS needed here if it's defined in app.css or using default layout
-
-    def __init__(self, log_queue: deque):  # Use deque directly
+    def __init__(self, log_queue: deque):
         self.log_queue = log_queue
-        self._timer: Timer | None = None  # Use | for Optional, Timer type
+        self._timer: Timer | None = None
         super().__init__()
 
     def compose(self) -> ComposeResult:

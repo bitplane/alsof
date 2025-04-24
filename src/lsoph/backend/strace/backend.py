@@ -5,33 +5,27 @@ import asyncio
 import logging
 import os
 import shlex
-import shutil  # Keep for shutil.which
+import shutil
 import sys
-from collections.abc import AsyncIterator  # Import AsyncIterator from collections.abc
-
-# Use Python 3.10+ style hints
-# Removed: from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
-from typing import Any  # Keep Any for now
+from collections.abc import AsyncIterator
+from typing import Any
 
 import psutil
 
+from lsoph.backend.strace import handlers, helpers
 from lsoph.monitor import Monitor
-from lsoph.strace import handlers, helpers
-from lsoph.util.pid import get_cwd as pid_get_cwd  # Import from top-level util
+from lsoph.util.pid import get_cwd as pid_get_cwd
 
-# Correct import path assuming strace is a sibling directory to backend
-# If strace is inside backend, it would be from . import handlers, helpers etc.
-# Assuming sibling structure based on diff paths:
-from ..base import Backend  # Import base backend class
-from .parse import (  # Import from sibling parse module
+from ..base import Backend
+from .parse import (
     EXIT_SYSCALLS,
     PROCESS_SYSCALLS,
     Syscall,
     parse_strace_stream,
 )
-from .terminate import terminate_strace_process  # Import from sibling terminate module
+from .terminate import terminate_strace_process
 
-log = logging.getLogger(__name__)  # Use module-specific logger
+log = logging.getLogger(__name__)
 
 # --- Constants ---
 STRACE_BASE_OPTIONS = ["-f", "-s", "4096", "-xx", "-o", "/dev/stderr"]
@@ -68,9 +62,8 @@ DEFAULT_SYSCALLS = sorted(
 
 
 # --- Event Processing Helper ---
-# This remains in backend.py but now uses imported handlers
 async def _process_single_event(
-    event: Syscall, monitor: Monitor, cwd_map: dict[int, str]  # Use dict
+    event: Syscall, monitor: Monitor, cwd_map: dict[int, str]
 ):
     """Processes a single Syscall event, updating state and CWD map."""
     pid = event.pid
@@ -94,7 +87,7 @@ async def _process_single_event(
 
     # Handle specific syscalls that modify state or need special handling first
     if syscall_name in ["chdir", "fchdir"]:
-        handlers.update_cwd(pid, cwd_map, monitor, event)  # Use handlers.update_cwd
+        handlers.update_cwd(pid, cwd_map, monitor, event)
         return
 
     if syscall_name in EXIT_SYSCALLS:
@@ -106,14 +99,10 @@ async def _process_single_event(
         return
 
     # Dispatch to generic handlers for file operations
-    handler = handlers.SYSCALL_HANDLERS.get(
-        syscall_name
-    )  # Use handlers.SYSCALL_HANDLERS
+    handler = handlers.SYSCALL_HANDLERS.get(syscall_name)
     if handler:
         try:
-            handler(
-                event, monitor, cwd_map
-            )  # Call the handler from the handlers module
+            handler(event, monitor, cwd_map)
         except Exception as e:
             log.exception(f"Handler error for {syscall_name} (event: {event!r}): {e}")
     # else: # Log unhandled syscalls if needed (might be noisy)
@@ -127,9 +116,7 @@ async def _process_single_event(
 class StraceBackend(Backend):
     """Async backend implementation using strace (refactored)."""
 
-    def __init__(
-        self, monitor: Monitor, syscalls: list[str] = DEFAULT_SYSCALLS
-    ):  # Use list
+    def __init__(self, monitor: Monitor, syscalls: list[str] = DEFAULT_SYSCALLS):
         super().__init__(monitor)
         # Ensure essential syscalls are always included
         self.syscalls = sorted(
@@ -140,14 +127,12 @@ class StraceBackend(Backend):
                 | {"chdir", "fchdir"}  # Explicitly add chdir/fchdir
             )
         )
-        self._strace_process: asyncio.subprocess.Process | None = (
-            None  # Use | for Optional
-        )
+        self._strace_process: asyncio.subprocess.Process | None = None
 
     # --- Stream Reading Helper ---
     async def _read_stderr_lines(
         self, stderr: asyncio.StreamReader, stop_event: asyncio.Event
-    ) -> AsyncIterator[str]:  # Use AsyncIterator from collections.abc
+    ) -> AsyncIterator[str]:
         """Reads lines from the strace stderr stream asynchronously."""
         pid_str = str(self._strace_process.pid) if self._strace_process else "unknown"
         log.debug(f"Starting stderr reader loop for strace process {pid_str}")
@@ -182,7 +167,7 @@ class StraceBackend(Backend):
     async def _process_event_stream(
         self,
         event_stream: AsyncIterator[Syscall],
-        pid_cwd_map: dict[int, str],  # Use AsyncIterator, dict
+        pid_cwd_map: dict[int, str],
     ):
         """Internal helper method to process the stream of Syscall events."""
         log.info("Starting internal event processing loop...")
@@ -214,14 +199,14 @@ class StraceBackend(Backend):
     # --- End Event Stream Processing ---
 
     # --- Attach Method ---
-    async def attach(self, pids: list[int]):  # Use list
+    async def attach(self, pids: list[int]):
         """Implementation of the attach method."""
         if not pids:
             log.warning("StraceBackend.attach called with no PIDs.")
             return
 
         log.info(f"Attaching strace to PIDs/TIDs: {pids}")
-        pid_cwd_map: dict[int, str] = {}  # Use dict
+        pid_cwd_map: dict[int, str] = {}
         # Pre-populate CWD map for initially attached PIDs
         for pid in pids:
             # Use the imported pid_get_cwd utility function
@@ -302,7 +287,7 @@ class StraceBackend(Backend):
     # --- End Attach Method ---
 
     # --- Run Command Method ---
-    async def run_command(self, command: list[str]):  # Use list
+    async def run_command(self, command: list[str]):
         """Implementation of the run_command method."""
         if not command:
             log.error("StraceBackend.run_command called empty.")
@@ -311,7 +296,7 @@ class StraceBackend(Backend):
         log.info(
             f"Running command via strace: {' '.join(shlex.quote(c) for c in command)}"
         )
-        pid_cwd_map: dict[int, str] = {}  # Use dict
+        pid_cwd_map: dict[int, str] = {}
 
         strace_path = shutil.which("strace")
         if not strace_path:

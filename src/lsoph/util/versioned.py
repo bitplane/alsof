@@ -7,9 +7,6 @@ thread-safe access using locks. Useful for UI updates based on state changes.
 import threading
 from functools import wraps
 
-# Use Python 3.10+ style hints
-# No typing imports were used here that need changing.
-
 
 class Versioned:
     """
@@ -38,9 +35,7 @@ class Versioned:
         Returns the current version number of this object.
         Acquires the lock for thread-safe read.
         """
-        # Reading the version should also be protected by the lock,
-        # although reading a simple int is often atomic, it's safer
-        # to be consistent, especially if version logic became complex.
+        # Reading the version should also be protected by the lock for consistency.
         with self._lock:
             return self._version
 
@@ -63,7 +58,7 @@ def changes(method):
     """
 
     @wraps(method)
-    def wrapper(self: Versioned, *args, **kwargs):  # Add type hint for self
+    def wrapper(self: Versioned, *args, **kwargs):
         # Ensure the decorated method is called on an instance of Versioned or subclass
         if not isinstance(self, Versioned):
             raise TypeError(
@@ -90,7 +85,7 @@ def waits(method):
     """
 
     @wraps(method)
-    def wrapper(self: Versioned, *args, **kwargs):  # Add type hint for self
+    def wrapper(self: Versioned, *args, **kwargs):
         # Ensure the decorated method is called on an instance of Versioned or subclass
         if not isinstance(self, Versioned):
             raise TypeError(
