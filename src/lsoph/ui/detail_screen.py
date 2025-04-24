@@ -8,12 +8,15 @@ from typing import Any
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical  # Keep Vertical for layout structure
+from textual.containers import Vertical
 from textual.screen import Screen
-from textual.widgets import DataTable, Footer, Static  # Removed Header, Added DataTable
+from textual.widgets import DataTable, Footer, Static
 
 from lsoph.monitor import FileInfo
 from lsoph.util.short_path import short_path
+
+# Import the emoji map from the emoji module
+from .emoji import DEFAULT_EMOJI, EVENT_EMOJI_MAP, STATUS_EMOJI_MAP
 
 log = logging.getLogger("lsoph.ui.detail")
 
@@ -23,17 +26,7 @@ class DetailScreen(Screen):
 
     BINDINGS = [
         Binding("escape,q,d,enter", "app.pop_screen", "Close", show=True),
-        # DataTable handles its own scrolling, so specific scroll bindings removed.
-        # Keep other relevant bindings if needed.
     ]
-
-    # Optional: Add CSS for the DataTable within this screen if needed
-    # CSS = """
-    # DetailScreen > Vertical > DataTable {
-    #     height: 1fr; /* Make table fill available space */
-    #     border: round $panel;
-    # }
-    # """
 
     def __init__(self, file_info: FileInfo):
         self.file_info = file_info
@@ -41,17 +34,13 @@ class DetailScreen(Screen):
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the detail screen."""
-        # Removed Header widget
-        # Use a Vertical container to stack the static header text and the table
         with Vertical(id="detail-content"):
             yield Static(self._create_header_text(), id="detail-header")
-            # Replace RichLog with DataTable
             yield DataTable(id="event-table", cursor_type="row", zebra_stripes=True)
         yield Footer()
 
     def _create_header_text(self) -> Text:
         """Creates the header text displayed above the table."""
-        # (This function remains the same as before)
         path_display = short_path(self.file_info.path, 100)
         status = self.file_info.status.upper()
         style = ""
@@ -77,8 +66,12 @@ class DetailScreen(Screen):
             # Add columns to the DataTable
             table.add_column("Timestamp", key="ts", width=12)
             table.add_column("Event", key="event", width=8)
-            table.add_column("Result", key="result", width=6)  # Adjusted width
-            table.add_column("Details", key="details", width=80)  # Allow more width
+            table.add_column("Result", key="result", width=6)
+            # Add new column for Emoji Meaning
+            table.add_column("Action", key="action", width=10)
+            table.add_column(
+                "Details", key="details", width=70
+            )  # Adjusted width slightly
 
             history = self.file_info.event_history
             log.debug(
@@ -90,6 +83,11 @@ class DetailScreen(Screen):
                     Text("No event history recorded for this file.", style="dim")
                 )
                 return
+
+            # Reverse map for finding meaning from emoji (handle potential duplicates if needed)
+            # For simplicity, we'll look up based on event type directly.
+            # emoji_to_meaning = {v: k for k, v in EVENT_EMOJI_MAP.items()}
+            # status_emoji_to_meaning = {v: k for k, v in STATUS_EMOJI_MAP.items()}
 
             # Write each event from history as a row
             for event in history:
@@ -103,24 +101,39 @@ class DetailScreen(Screen):
                         )[:-3]
                 except (TypeError, ValueError, OSError) as ts_err:
                     log.warning(f"Could not format timestamp {ts_raw}: {ts_err}")
-                ts_text = Text(ts_str)  # No padding needed in table cell
+                ts_text = Text(ts_str)
 
                 # Format event type
-                etype = str(event.get("type", "?")).upper()
-                etype_text = Text(etype)
+                event_type_str = str(event.get("type", "?")).upper()
+                etype_text = Text(event_type_str)
 
                 # Format result (OK/FAIL)
-                success = event.get("success", False)
+                success = event.get("success", True)  # Default to True if missing
                 result_text = (
                     Text("OK", style="green") if success else Text("FAIL", style="red")
                 )
+
+                # Determine Action/Meaning based on event type and success
+                action_str = "???"
+                if not success:
+                    action_str = "Error"  # Consistent with emoji map
+                else:
+                    # Look up the event type in the map
+                    # Find the key (meaning) corresponding to the emoji value
+                    # This assumes EVENT_EMOJI_MAP values are unique for meanings we care about here
+                    action_str = event_type_str  # Default to event type if no specific emoji meaning needed
+                    # Example: Find 'Open' for '📂' - better to just use event_type_str?
+                    # Let's just use the event type string directly for clarity.
+                    # emoji_for_event = EVENT_EMOJI_MAP.get(event_type_str, DEFAULT_EMOJI)
+                    # action_str = next((k for k, v in EVENT_EMOJI_MAP.items() if v == emoji_for_event), event_type_str)
+
+                action_text = Text(action_str.capitalize())  # Capitalize for display
 
                 # Format details dictionary
                 details_dict: dict[str, Any] = event.get("details", {})
                 filtered_details = {
                     k: v
                     for k, v in details_dict.items()
-                    # Exclude keys less relevant for direct display or redundant
                     if k
                     not in [
                         "syscall",
@@ -136,22 +149,23 @@ class DetailScreen(Screen):
                 if error_name and not success:
                     filtered_details["ERROR"] = Text(error_name, style="red")
 
-                # Create string representation of details, handling Text objects
                 details_parts = []
                 for k, v in filtered_details.items():
                     if isinstance(v, Text):
-                        # If value is already Text, use its plain form in the key=value string
-                        # The Text object itself will handle styling when added to the cell later
                         details_parts.append(f"{k}={v.plain!r}")
                     else:
                         details_parts.append(f"{k}={v!r}")
 
                 details_str = ", ".join(details_parts)
-                details_display = short_path(details_str.replace("\n", "\\n"), 80)
-                details_text = Text(details_display)  # Create Text object for the cell
+                details_display = short_path(
+                    details_str.replace("\n", "\\n"), 70
+                )  # Use adjusted width
+                details_text = Text(details_display)
 
-                # Add the row to the table
-                table.add_row(ts_text, etype_text, result_text, details_text)
+                # Add the row to the table including the new action column
+                table.add_row(
+                    ts_text, etype_text, result_text, action_text, details_text
+                )
 
             # Focus the table after populating
             table.focus()
@@ -161,13 +175,9 @@ class DetailScreen(Screen):
                 f"Error populating detail screen table for {self.file_info.path}"
             )
             try:
-                # Try to display error in the table itself
                 table = self.query_one(DataTable)
-                table.clear()  # Clear any partial content
+                table.clear()
                 table.add_row(Text(f"Error loading details: {e}", style="bold red"))
             except Exception:
-                pass  # Ignore errors during error reporting
+                pass
             self.notify("Error loading details.", severity="error")
-
-    # Scrolling actions are removed as DataTable handles its own scrolling via arrow keys/PgUp/PgDn etc.
-    # If custom scroll actions were needed, they would target the DataTable widget.
