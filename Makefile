@@ -18,7 +18,7 @@ test: .venv/.installed-dev  ## run the project's tests
 coverage: .venv/.installed-dev scripts/coverage.sh  ## build the html coverage report
 	scripts/coverage.sh $(PROJECT_NAME)
 
-docs: scripts/docs.sh README.md docs/index.md ## build the documentation
+docs: scripts/docs.sh docs/index.md ## build the documentation
 	scripts/docs.sh
 
 clean:  ## delete caches and the venv
