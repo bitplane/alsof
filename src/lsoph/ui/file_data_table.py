@@ -1,9 +1,9 @@
 # Filename: src/lsoph/ui/file_data_table.py
-"""A specialized DataTable widget for displaying lsoph file info with partial updates."""
+"""A specialized DataTable widget for displaying lsoph file info."""
 
 import logging
 import time
-from typing import Any, Dict, List, Optional, Set, Tuple  # Added more types
+from typing import Any, Dict, List, Optional, Tuple  # Added Dict, Tuple, List
 
 from rich.text import Text
 from textual import events
@@ -19,7 +19,7 @@ from .emoji import get_emoji_history_string
 
 log = logging.getLogger("lsoph.ui.table")
 
-# Type alias for the visual data tuple
+# Type alias for the visual data tuple (must match column order)
 RowVisualData = Tuple[Text, Text, Text]
 
 
@@ -28,7 +28,6 @@ def _format_file_info_for_table(
     info: FileInfo, available_width: int, current_time: float
 ) -> RowVisualData:  # Returns visual components directly
     """Formats FileInfo into data suitable for DataTable.add_row/update_cell."""
-    # (Implementation remains the same as your fixed version)
 
     # --- Get Emoji History ---
     MAX_EMOJI_HISTORY = 5  # Keep consistent with column width
@@ -76,30 +75,33 @@ def _format_file_info_for_table(
 
 
 class FileDataTable(DataTable):
-    """A DataTable specialized for displaying and managing FileInfo with partial updates."""
+    """
+    A DataTable specialized for displaying and managing FileInfo.
+    Uses full refresh for updates to maintain sort order, with robust cursor handling.
+    """
 
     RECENT_COL_WIDTH = 8
     AGE_COL_WIDTH = 5
-    SCROLLBAR_WIDTH = 2
-    COLUMN_PADDING = 2
+    SCROLLBAR_WIDTH = 2  # User's estimate
+    COLUMN_PADDING = 2  # User's estimate
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.cursor_type = "row"
         self.zebra_stripes = True
-        # Cache the last known visual data for each row key to enable diffing
-        self._row_data_cache: Dict[RowKey, RowVisualData] = {}
-        # Store row keys in the order they are *supposed* to be based on last sort
-        # This helps manage cursor fallback but doesn't directly control table order
-        self._sorted_row_keys: List[RowKey] = []
+        # Store row keys in the visual order they were *last added*
+        # Used for cursor fallback logic
+        self._current_visual_keys: List[RowKey] = []
 
     def on_mount(self) -> None:
         """Set up columns on mount."""
         super().on_mount()
         self.add_column("Recent", key="history", width=self.RECENT_COL_WIDTH)
+        # Calculate and set initial path width using the helper
         initial_path_width = self._get_path_column_width()
         self.add_column("Path", key="path", width=initial_path_width)
         self.add_column("Age", key="age", width=self.AGE_COL_WIDTH)
+        # Explicitly disable auto_width for the path column to respect our calculation
         self.columns["path"].auto_width = False
         log.debug(
             f"FileDataTable mounted. Initial path width set to {initial_path_width}"
@@ -107,13 +109,9 @@ class FileDataTable(DataTable):
 
     def _get_path_column_width(self):
         """Calculates the desired width for the path column based on user's logic."""
-        # Use self.size.width which reflects the widget's current allocated space
-        w = self.size.width - self.SCROLLBAR_WIDTH  # Typo fixed
-        # Subtract estimated padding/separators for all columns
+        w = self.size.width - self.SCROLLBAR_WIDTH
         w -= len(self.columns) * self.COLUMN_PADDING
-        # Subtract fixed widths of other columns
         calculated_width = w - self.RECENT_COL_WIDTH - self.AGE_COL_WIDTH
-        # Ensure width is at least 1
         return max(1, calculated_width)
 
     @property
@@ -141,18 +139,31 @@ class FileDataTable(DataTable):
                 f"*** FileDataTable RESIZE: New path width {new_width} (event size {event.size.width}) ***"
             )
             # Refresh might be needed if header/content doesn't redraw correctly automatically
-            self.refresh()  # Usually not needed as width change triggers redraw
+            # self.refresh()
 
     def update_data(self, sorted_file_infos: list[FileInfo]) -> None:
         """
-        Updates the table content using partial updates (add/remove/update_cell).
+        Updates the table content using a full refresh to maintain sort order,
+        and robustly restores the cursor position.
         """
         current_time = time.time()
-        log.debug(f"Starting partial update with {len(sorted_file_infos)} items.")
+        log.debug(f"Starting full refresh update with {len(sorted_file_infos)} items.")
 
-        # --- Preserve Cursor ---
-        selected_key_before_update = self.selected_path
+        # --- Preserve Cursor State (Key and Index) ---
+        selected_key_before_update: Optional[RowKey] = None
+        selected_path_str = self.selected_path  # Get the string path
+        if selected_path_str:
+            selected_key_before_update = RowKey(selected_path_str)
+
         selected_index_before_update = self.cursor_row
+        # Store the key order *before* clearing
+        previous_visual_keys = list(
+            self.rows.keys()
+        )  # Get keys in current visual order
+
+        log.debug(
+            f"Cursor before update: Key='{selected_key_before_update}', Index={selected_index_before_update}"
+        )
 
         # --- Calculate width for text formatting ---
         path_text_width = self._get_path_column_width()
@@ -161,126 +172,108 @@ class FileDataTable(DataTable):
         if path_column and path_column.width != path_text_width:
             path_column.width = path_text_width
 
-        # --- Prepare New State ---
-        new_key_to_info_map: Dict[RowKey, FileInfo] = {
-            RowKey(info.path): info for info in sorted_file_infos
-        }
-        new_keys_set: Set[RowKey] = set(new_key_to_info_map.keys())
-        # Keep track of the desired sorted order
-        self._sorted_row_keys = list(new_key_to_info_map.keys())
+        # --- Full Refresh Implementation ---
+        self.clear()
+        new_visual_keys: List[RowKey] = []
+        new_key_to_index_map: Dict[RowKey, int] = {}
 
-        # --- Diffing Logic ---
-        current_keys_set: Set[RowKey] = set(self.rows.keys())
-        keys_to_add = new_keys_set - current_keys_set
-        keys_to_remove = current_keys_set - new_keys_set
-        keys_to_check = current_keys_set.intersection(
-            new_keys_set
-        )  # Keys present before and after
+        for idx, info in enumerate(sorted_file_infos):
+            row_key_value = info.path
+            row_key = RowKey(row_key_value)
 
-        # --- Process Removals ---
-        if keys_to_remove:
-            log.debug(f"Removing {len(keys_to_remove)} rows.")
-            for key in keys_to_remove:
-                try:
-                    self.remove_row(key)
-                    self._row_data_cache.pop(key, None)  # Remove from cache
-                except KeyError:
-                    log.warning(f"Attempted to remove non-existent key: {key.value}")
-                except Exception as e:
-                    log.exception(f"Error removing row key {key.value}: {e}")
-
-        # --- Process Additions and Updates ---
-        added_count = 0
-        updated_count = 0
-        for key in self._sorted_row_keys:  # Iterate in the NEW desired order
-            info = new_key_to_info_map[key]
-            new_visuals = _format_file_info_for_table(
+            # Format data for the row using the current column width for path text shortening
+            recent_text, path_text, age_text = _format_file_info_for_table(
                 info, path_text_width, current_time
             )
+            row_data = (recent_text, path_text, age_text)
 
-            if key in keys_to_check:
-                # Existing key: Check if visual data changed
-                old_visuals = self._row_data_cache.get(key)
-                # Compare string representations for simplicity, or tuple directly
-                if old_visuals is None or new_visuals != old_visuals:
-                    try:
-                        # Update cells only if data differs
-                        self.update_cell(
-                            key, "history", new_visuals[0], update_width=False
-                        )
-                        self.update_cell(
-                            key, "path", new_visuals[1], update_width=False
-                        )
-                        self.update_cell(key, "age", new_visuals[2], update_width=False)
-                        self._row_data_cache[key] = new_visuals
-                        updated_count += 1
-                    except KeyError:
-                        log.warning(
-                            f"KeyError updating cell for key (might have been removed concurrently?): {key.value}"
-                        )
-                    except Exception as e:
-                        log.exception(f"Error updating cells for key {key.value}: {e}")
-                # else: Row exists and visuals are the same, do nothing.
+            try:
+                self.add_row(*row_data, key=row_key_value)
+                new_visual_keys.append(row_key)  # Store keys in the new visual order
+                new_key_to_index_map[row_key] = idx
+            except KeyError:
+                log.warning(f"Attempted to add duplicate row key: {row_key_value}")
+            except Exception as add_exc:
+                log.exception(f"Error adding row for key {row_key_value}: {add_exc}")
 
-            elif key in keys_to_add:
-                # New key: Add the row
-                try:
-                    # Add row - NOTE: This appends visually, does NOT respect sorted order here
-                    self.add_row(*new_visuals, key=key.value)
-                    self._row_data_cache[key] = new_visuals
-                    added_count += 1
-                except KeyError:
-                    log.warning(
-                        f"Attempted to add duplicate row key during add phase: {key.value}"
-                    )
-                except Exception as e:
-                    log.exception(f"Error adding row for key {key.value}: {e}")
-
-        if added_count > 0:
-            log.debug(f"Added {added_count} new rows.")
-        if updated_count > 0:
-            log.debug(f"Updated {updated_count} existing rows.")
-        if added_count > 0:
-            log.warning(
-                "Added rows appear at the end due to DataTable limitations; visual sort order may be temporarily incorrect."
-            )
+        self._current_visual_keys = (
+            new_visual_keys  # Update internal state AFTER adding rows
+        )
+        # --- End Full Refresh ---
 
         # --- Restore Cursor ---
-        new_cursor_index = -1
+        target_key_to_select: Optional[RowKey] = None
+        final_cursor_index = -1
+
         if selected_key_before_update:
-            selected_rowkey_obj = RowKey(selected_key_before_update)
-            # Check if the key still exists *in the table's rows* after updates
-            if selected_rowkey_obj in self.rows:
-                try:
-                    # Find the new visual index of the key
-                    # This requires iterating through the current visual order
-                    current_visual_keys = list(self.rows.keys())
-                    new_cursor_index = current_visual_keys.index(selected_rowkey_obj)
-                except ValueError:
-                    log.warning(
-                        f"Selected key '{selected_key_before_update}' not found in final table rows despite being expected."
-                    )
-                    # Fallback if index lookup fails unexpectedly
-                    if self.row_count > 0:
-                        potential_index = max(0, selected_index_before_update - 1)
-                        new_cursor_index = min(potential_index, self.row_count - 1)
+            # Check if the originally selected key still exists in the new data
+            if selected_key_before_update in new_key_to_index_map:
+                target_key_to_select = selected_key_before_update
+                log.debug(
+                    f"Original selected key '{target_key_to_select.value}' still exists."
+                )
             else:
-                # Key is gone, use fallback logic based on previous index
-                if self.row_count > 0:
-                    potential_index = max(0, selected_index_before_update - 1)
-                    new_cursor_index = min(potential_index, self.row_count - 1)
+                # Original key is gone (deleted/ignored). Find the key that was visually above it.
+                log.debug(
+                    f"Original selected key '{selected_key_before_update.value}' is gone."
+                )
+                # Use the key order from *before* the clear operation
+                if (
+                    selected_index_before_update > 0
+                    and selected_index_before_update <= len(previous_visual_keys)
+                ):
+                    # Get the key that was visually at the index *above* the old selection
+                    key_above_before_update = previous_visual_keys[
+                        selected_index_before_update - 1
+                    ]
+                    log.debug(
+                        f"Trying fallback key (was above): '{key_above_before_update.value}'"
+                    )
+                    # Check if *this* key still exists in the new data map
+                    if key_above_before_update in new_key_to_index_map:
+                        target_key_to_select = key_above_before_update
+                    else:
+                        log.debug(
+                            f"Fallback key '{key_above_before_update.value}' also not found in new map."
+                        )
+                else:
+                    log.debug(
+                        "Original selection was at index 0 or invalid, cannot get key above."
+                    )
+
+        # If we found a target key (original or fallback), find its new index
+        if target_key_to_select:
+            final_cursor_index = new_key_to_index_map.get(target_key_to_select, -1)
+            if final_cursor_index != -1:
+                log.debug(
+                    f"Target key '{target_key_to_select.value}' found at new index {final_cursor_index}."
+                )
+            else:
+                # This shouldn't happen if the key is in the map, but handle defensively
+                log.warning(
+                    f"Target key '{target_key_to_select.value}' was in map but index lookup failed?"
+                )
+
+        # If no target key determined (original gone, fallback gone/failed), or index lookup failed,
+        # try to select the top row if the table is not empty.
+        if final_cursor_index == -1 and self.row_count > 0:
+            log.debug("No target key found or index lookup failed, selecting row 0.")
+            final_cursor_index = 0
 
         # Move cursor if a valid index was determined
-        if new_cursor_index != -1:
+        if final_cursor_index != -1:
             try:
-                if self.is_valid_row_index(new_cursor_index):
-                    self.move_cursor(row=new_cursor_index, animate=False)
+                if self.is_valid_row_index(final_cursor_index):
+                    self.move_cursor(row=final_cursor_index, animate=False)
+                    log.debug(f"Moved cursor to index {final_cursor_index}.")
                 else:
                     log.warning(
-                        f"Calculated new cursor index {new_cursor_index} is invalid."
+                        f"Calculated final cursor index {final_cursor_index} is invalid for row_count {self.row_count}."
                     )
             except Exception as e:
-                log.error(f"Error moving cursor to row {new_cursor_index}: {e}")
+                log.error(f"Error moving cursor to row {final_cursor_index}: {e}")
+        else:
+            log.debug("No valid cursor index determined (table might be empty).")
         # --- End Restore Cursor ---
 
-        log.debug("Partial update finished.")
+        log.debug("Full refresh update finished.")
