@@ -1,3 +1,4 @@
+# Filename: src/lsoph/backend/strace/parser_defs.py
 """
 Defines the pyparsing grammar for strace syscall output lines.
 - Quoted strings -> bytes (escapes interpreted via c_str_to_bytes)
@@ -19,20 +20,26 @@ from lsoph.util.string import c_str_to_bytes
 log = logging.getLogger(__name__)
 
 
-# --- Basic building blocks ---
 def convert_raw_string_to_bytes(tokens):
     """Convert quoted string tokens to bytes using c_str_to_bytes utility."""
-    return c_str_to_bytes(tokens[0])
+    # The token might include the quotes, remove them if present
+    s = tokens[0]
+    if s.startswith('"') and s.endswith('"'):
+        s = s[1:-1]
+
+    try:
+        result = c_str_to_bytes(s)
+        return result
+    except Exception as e:
+        log.error(f"Error converting string to bytes: {e}, input: {s!r}")
+        return s.encode("utf-8")
 
 
 def convert_struct_to_bytes(tokens):
-    """Convert struct content to bytes.
-
-    Ensures the struct is always returned as bytes, never as an integer or other type.
-    """
+    """Convert struct content to bytes."""
     struct_text = tokens[0]
 
-    # Make sure we have a string, even if originalTextFor returns something unexpected
+    # Make sure we have a string
     if not isinstance(struct_text, str):
         struct_text = str(struct_text)
 
@@ -44,8 +51,6 @@ def convert_struct_to_bytes(tokens):
 
     return struct_text.encode("utf-8")
 
-
-# --- Grammar Definition ---
 
 # Basic elements
 LPAREN, RPAREN, LBRACE, RBRACE, LT, GT, EQ, COMMA, PIPE = map(pp.Suppress, "(){}<>=,|")
@@ -64,14 +69,14 @@ number = hex_integer | octal_integer | integer
 pid = integer.copy().setResultsName("pid")
 syscall_name = pp.Word(pp.alphas + "_", pp.alphanums + "_").setResultsName("syscall")
 
-# --- Specialized parsers for different types ---
+# Strings - custom approach to preserve raw string exactly as it appears
+QUOTE = pp.Literal('"').suppress()
+STRING_CONTENT = pp.SkipTo('"', include=False, ignore=pp.Literal('\\"'))
+quoted_string = (QUOTE + STRING_CONTENT + QUOTE).setParseAction(
+    convert_raw_string_to_bytes
+)
 
-# Strings to bytes
-quoted_string = pp.QuotedString(
-    '"', escChar="\\", multiline=False, unquoteResults=True
-).setParseAction(convert_raw_string_to_bytes)
-
-# Structs to bytes - using a reliable approach that always returns bytes
+# Structs to bytes
 struct_content = pp.Forward()
 struct_content << pp.SkipTo("}", include=True)
 struct = (LBRACE + struct_content).setParseAction(convert_struct_to_bytes)
@@ -88,20 +93,20 @@ identifier = pp.Word(pp.alphas + "_/", pp.alphanums + "_/.-")
 # Pointers (hex addresses)
 pointer = hex_integer.copy()
 
-# --- Parameter values ---
+# Parameter values
 param_value = pp.Forward()
 param_value << (
     struct
-    | quoted_string  # Struct returns bytes
-    | flags_expr  # Quoted string returns bytes
-    | at_fdcwd  # Flags expression returns str
-    | null_ptr  # AT_FDCWD returns str
-    | pointer  # NULL or (null) returns str
-    | identifier  # Pointer returns int
-    | number  # Identifier returns str  # Number returns int
+    | quoted_string
+    | flags_expr
+    | at_fdcwd
+    | null_ptr
+    | pointer
+    | identifier
+    | number
 )
 
-# --- Parameter parsing ---
+# Parameter parsing
 key = pp.Word(pp.alphas + "_", pp.alphanums + "_")
 key_value_pair = pp.Group(key + EQ + param_value)
 param = key_value_pair | pp.Group(param_value)
@@ -109,7 +114,7 @@ param = key_value_pair | pp.Group(param_value)
 pp.ParserElement.setDefaultWhitespaceChars(" \t")
 param_list = pp.Optional(pp.delimitedList(param, delim=COMMA)).setResultsName("args")
 
-# --- Result parsing ---
+# Result parsing
 result_val = (number | pp.Literal("?")).setResultsName("result_val")
 
 error_name = pp.Word(pp.alphas + "_", pp.alphanums + "_").setResultsName("error_name")
@@ -121,7 +126,7 @@ error_part = pp.Group(error_name + LPAREN + error_msg_content + RPAREN).setResul
 timing_val = ppc.real.copy().setResultsName("timing")
 timing_part = pp.Group(LT + timing_val + GT).setResultsName("timing_part")
 
-# --- Complete syscall line ---
+# Complete syscall line
 syscall_body = (
     syscall_name
     + LPAREN
@@ -133,7 +138,7 @@ syscall_body = (
     + pp.Optional(timing_part)
 )
 
-# --- Full line parser ---
+# Full line parser
 full_line_parser = (
     pp.Optional(pid)
     + pp.Group(syscall_body).setResultsName("syscall_complete")
@@ -141,6 +146,15 @@ full_line_parser = (
 )
 
 full_line_parser.parseWithTabs()
+
+# Separate parser for resumed suffixes
+resumed_suffix_parser = (
+    EQ
+    + result_val
+    + pp.Optional(error_part)
+    + pp.Optional(timing_part)
+    + pp.StringEnd()
+)
 
 
 def parse_line(line_str: str) -> pp.ParseResults:

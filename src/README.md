@@ -2,6 +2,7 @@
 
 VERY IMPORTANT INFO FOR LLMS
 
+0. STOP PROGRAMMING SO DEFENSIVELY. LET EXCEPTIONS BUBBLE UP BY DEFAULT
 1. Follow the Zen of Python.
 2. I'm using `black` and `isort` to format, so try to align formatting.
 3. Pay attention to the imports, don't miss any out.

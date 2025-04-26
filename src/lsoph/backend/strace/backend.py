@@ -3,49 +3,34 @@
 
 import asyncio
 import logging
-import os  # For os.open(), os.close(), os.set_blocking(), os.fdopen()
-import pathlib  # For path manipulation
+import os
+import pathlib
 import shlex
 import shutil
 import sys
-import tempfile  # For TemporaryDirectory
+import tempfile
 from collections.abc import AsyncIterator
-from typing import Any, Set  # Use Set from typing for 3.10+
+from typing import Any, Set
 
-import psutil  # Keep for pid_exists check
+import psutil
 
 # Corrected import path for handlers and helpers
-# Handlers expect Syscall with str args, helpers expect str path for clean_path_arg
 from lsoph.backend.strace import handlers, helpers
-
-# Import TRACE_LEVEL_NUM for logging
 from lsoph.log import TRACE_LEVEL_NUM
 from lsoph.monitor import Monitor
-
-# Import the FIFO utility
-from lsoph.util.fifo import temp_fifo  # Renamed from managed_temp_fifo
-
-# pid_get_cwd now returns bytes
+from lsoph.util.fifo import temp_fifo
 from lsoph.util.pid import get_cwd as pid_get_cwd
 
 from ..base import Backend
-
-# --- UPDATED IMPORTS for pyparsing ---
-from .parse import (
-    parse_strace_stream_pyparsing as parse_strace_stream,  # Import pyparsing parser
-)
-from .syscall import EXIT_SYSCALLS, PROCESS_SYSCALLS, Syscall  # Import from syscall.py
-
-# -------------------------------------
+from .parse import parse_strace_stream_pyparsing as parse_strace_stream
+from .syscall import EXIT_SYSCALLS, PROCESS_SYSCALLS, Syscall
 from .terminate import terminate_strace_process
 
 log = logging.getLogger(__name__)
 
 # --- Constants ---
-# --- Use -xx, remove -o (we'll provide FIFO path) ---
 STRACE_BASE_OPTIONS = ["-f", "-qq", "-s", "4096"]
-# ---------------------------------------------------
-# Define default syscalls here
+
 FILE_STRUCT_SYSCALLS = [
     "open",
     "openat",
@@ -71,15 +56,13 @@ DEFAULT_SYSCALLS = sorted(
         | set(FILE_STRUCT_SYSCALLS)
         | set(IO_SYSCALLS)
         | set(EXIT_SYSCALLS)
-        | {"chdir", "fchdir"}  # Ensure chdir/fchdir are included
+        | {"chdir", "fchdir"}
     )
 )
 # --- End Constants ---
 
 
 # --- Event Processing Helper ---
-
-
 async def _process_single_event(
     event: Syscall, monitor: Monitor, cwd_map: dict[int, bytes], initial_pids: Set[int]
 ):
@@ -89,7 +72,7 @@ async def _process_single_event(
     Receives Syscall object with string args from pyparsing parser.
     """
     pid = event.pid
-    syscall_name = event.syscall  # This is str
+    syscall_name = event.syscall
 
     log.debug(f"Processing event: {event!r}")
 
@@ -100,21 +83,24 @@ async def _process_single_event(
         and event.child_pid is not None
     ):
         child_pid = event.child_pid
-        parent_cwd: bytes | None = cwd_map.get(pid)
+        parent_cwd = cwd_map.get(pid)
         if parent_cwd:
             cwd_map[child_pid] = parent_cwd
             log.debug(
-                f"PID {child_pid} inherited CWD from parent {pid}: {os.fsdecode(parent_cwd)!r}"
+                f"PID {child_pid} inherited CWD from parent {pid}: "
+                f"{os.fsdecode(parent_cwd)!r}"
             )
         else:
             log.warning(
-                f"Parent PID {pid} CWD unknown for new child {child_pid}. Attempting direct lookup."
+                f"Parent PID {pid} CWD unknown for new child {child_pid}. "
+                "Attempting direct lookup."
             )
-            child_cwd: bytes | None = pid_get_cwd(child_pid)
+            child_cwd = pid_get_cwd(child_pid)
             if child_cwd:
                 cwd_map[child_pid] = child_cwd
                 log.info(
-                    f"Fetched CWD for new child PID {child_pid}: {os.fsdecode(child_cwd)!r}"
+                    f"Fetched CWD for new child PID {child_pid}: "
+                    f"{os.fsdecode(child_cwd)!r}"
                 )
             else:
                 log.warning(f"Could not determine CWD for new child PID {child_pid}.")
@@ -122,19 +108,18 @@ async def _process_single_event(
 
     # 2. Ensure CWD is known for other syscalls
     if pid not in cwd_map and syscall_name not in EXIT_SYSCALLS:
-        cwd: bytes | None = pid_get_cwd(pid)
+        cwd = pid_get_cwd(pid)
         if cwd:
             cwd_map[pid] = cwd
             if pid in initial_pids:
                 log.info(f"Fetched CWD for initial PID {pid}: {os.fsdecode(cwd)!r}")
             else:
-                log.debug(
-                    f"Fetched CWD for PID {pid}: {os.fsdecode(cwd)!r}"
-                )  # Log CWD fetch for non-initial too
+                log.debug(f"Fetched CWD for PID {pid}: {os.fsdecode(cwd)!r}")
         else:
             if psutil.pid_exists(pid):
                 log.warning(
-                    f"Could not determine CWD for PID {pid} (still exists). Relative paths may be incorrect."
+                    f"Could not determine CWD for PID {pid} (still exists). "
+                    "Relative paths may be incorrect."
                 )
             else:
                 log.debug(f"Could not determine CWD for PID {pid} (process exited).")
@@ -142,7 +127,6 @@ async def _process_single_event(
     # 3. Handle chdir/fchdir
     if syscall_name in ["chdir", "fchdir"]:
         log.debug(f"Dispatching {syscall_name} to handlers.update_cwd")
-        # update_cwd expects Syscall with str args, encodes path internally
         handlers.update_cwd(pid, cwd_map, monitor, event)
         return
 
@@ -159,16 +143,11 @@ async def _process_single_event(
     if handler:
         log.debug(f"Found handler for {syscall_name}: {handler.__name__}")
         try:
-            # Pass bytes cwd_map; handler expects Syscall with str args
-            # and will encode path args to bytes internally
             handler(event, monitor, cwd_map)
         except Exception as e:
             log.exception(f"Handler error for {syscall_name} (event: {event!r}): {e}")
     else:
         log.debug(f"No specific handler found for syscall: {syscall_name}")
-
-
-# --- End Event Processing Helper ---
 
 
 # --- Backend Class ---
@@ -188,20 +167,15 @@ class Strace(Backend):
             )
         )
         self._strace_process: asyncio.subprocess.Process | None = None
-        self._initial_pids: Set[int] = set()  # Store initially attached PIDs
-        self._output_read_task: asyncio.Task | None = None  # Task for reading FIFO
-        self._stderr_read_task: asyncio.Task | None = (
-            None  # Task for reading strace's stderr
-        )
-        # --- REMOVED _fifo_read_fd ---
+        self._initial_pids: Set[int] = set()
+        self._output_read_task: asyncio.Task | None = None
+        self._stderr_read_task: asyncio.Task | None = None
 
     @staticmethod
     def is_available() -> bool:
         """Check if the strace executable is available in the system PATH."""
-        # Assume pyparsing is available
         return shutil.which("strace") is not None
 
-    # --- Stream Reading Helper (Reverted to StreamReader) ---
     async def _read_fifo(
         self, fifo_path: str, stop_event: asyncio.Event
     ) -> AsyncIterator[bytes]:
@@ -212,7 +186,7 @@ class Strace(Backend):
         reader = None
         transport = None
         read_fd = -1
-        fifo_file_obj = None  # Keep track of the file object
+        fifo_file_obj = None
         loop = asyncio.get_running_loop()
 
         try:
@@ -221,19 +195,15 @@ class Strace(Backend):
             read_fd = os.open(fifo_path, os.O_RDONLY)
             log.debug(f"Opened FIFO {fifo_path} with FD {read_fd}")
 
-            # Create a file object from the FD for connect_read_pipe
-            # Use buffering=0 for raw I/O
+            # Create a file object from the FD for connect_read_pipe with raw I/O
             fifo_file_obj = os.fdopen(read_fd, "rb", buffering=0)
-            # The FD is now associated with fifo_file_obj, don't close read_fd manually yet
+            read_fd = -1  # FD is now owned by fifo_file_obj
 
             # Create StreamReader and connect it to the pipe file object
             reader = asyncio.StreamReader(loop=loop)
             protocol = asyncio.StreamReaderProtocol(reader, loop=loop)
             transport, _ = await loop.connect_read_pipe(lambda: protocol, fifo_file_obj)
-            log.debug(
-                f"Connected FIFO read FD {read_fd} via file object to StreamReader"
-            )
-            read_fd = -1  # FD is now managed by transport/protocol/file object
+            log.debug(f"Connected FIFO read via file object to StreamReader")
 
             while not stop_event.is_set():
                 try:
@@ -273,24 +243,21 @@ class Strace(Backend):
             log.debug(f"Cleaning up FIFO reader for {fifo_path}.")
             if transport and not transport.is_closing():
                 transport.close()
-            # --- Close the file object if it was created ---
+
+            # Close the file object if it was created
             if fifo_file_obj:
                 try:
                     fifo_file_obj.close()
                     log.debug(f"Closed FIFO file object for {fifo_path}")
                 except Exception as close_err:
                     log.warning(f"Error closing FIFO file object: {close_err}")
-            # Ensure original FD is closed if fdopen failed or wasn't called
+            # Ensure original FD is closed if fdopen failed
             elif read_fd != -1:
                 try:
                     os.close(read_fd)
                 except OSError:
                     pass
-            # -------------------------------------------------
 
-    # --- End Stream Reading Helper ---
-
-    # --- ADDED: Helper to read and log strace's own stderr ---
     async def _read_and_log_stderr(
         self, stderr: asyncio.StreamReader | None, stop_event: asyncio.Event
     ):
@@ -298,6 +265,7 @@ class Strace(Backend):
         if not stderr:
             log.warning("Strace process has no stderr stream to monitor.")
             return
+
         log.debug("Starting strace stderr reader task.")
         try:
             while not stop_event.is_set():
@@ -306,6 +274,7 @@ class Strace(Backend):
                     if not line_bytes:
                         log.debug("Strace stderr EOF reached.")
                         break
+
                     line_str = line_bytes.decode("utf-8", "replace").rstrip()
                     # Log strace's own messages at WARNING level to make them visible
                     log.warning(f"Strace stderr: {line_str}")
@@ -322,20 +291,16 @@ class Strace(Backend):
         finally:
             log.debug("Exiting strace stderr reader task.")
 
-    # --- END ADDED ---
-
-    # --- Event Stream Processing (Restored) ---
     async def _process_event_stream(
         self,
-        event_stream: AsyncIterator[Syscall],  # Argument kept for signature
+        event_stream: AsyncIterator[Syscall],
         pid_cwd_map: dict[int, bytes],
-        initial_pids: Set[int],  # Argument kept for signature
+        initial_pids: Set[int],
     ):
         """
         Internal helper method to process the stream of Syscall events.
-        (Restored from simplified version)
         """
-        log.debug("Starting event processing stream...")  # Added log
+        log.debug("Starting event processing stream...")
         processed_count = 0
         try:
             async for event in event_stream:
@@ -346,9 +311,8 @@ class Strace(Backend):
                 await _process_single_event(
                     event, self.monitor, pid_cwd_map, self._initial_pids
                 )
-                # --- Keep yield for responsiveness ---
-                await asyncio.sleep(0)  # Yield control more frequently
-                # -----------------------------------
+                # Yield control periodically for responsiveness
+                await asyncio.sleep(0)
         except asyncio.CancelledError:
             log.info("Event processing stream task cancelled.")
         finally:
@@ -356,9 +320,32 @@ class Strace(Backend):
                 f"Exiting internal event processing loop. Processed {processed_count} events."
             )
 
-    # --- End Event Stream Processing ---
+    async def _consume_fifo_stream(
+        self, fifo_path: str, pid_cwd_map: dict[int, bytes], attach_ids: list[int]
+    ):
+        """Helper coroutine to read FIFO lines, parse, and process events."""
+        try:
+            # Get the async iterator for reading lines
+            fifo_output_lines = self._read_fifo(fifo_path, self._should_stop)
 
-    # --- Common Strace Launch Logic ---
+            # Create the event stream using the parser
+            event_stream = parse_strace_stream(
+                fifo_output_lines,
+                self.monitor,
+                self._should_stop,
+                syscalls=self.syscalls,
+                attach_ids=attach_ids,
+            )
+
+            # Process the event stream
+            await self._process_event_stream(
+                event_stream, pid_cwd_map, self._initial_pids
+            )
+        except asyncio.CancelledError:
+            log.info("FIFO consumer task cancelled.")
+        except Exception as e:
+            log.exception(f"Error in FIFO consumer task: {e}")
+
     async def _launch_strace(
         self,
         strace_command: list[str],
@@ -366,13 +353,13 @@ class Strace(Backend):
         attach_ids: list[int] | None,
     ):
         """Launches strace, sets up FIFO reading, stderr reading, and processes events."""
-        # --- Use the renamed temp_fifo context manager ---
         try:
             with temp_fifo(prefix="lsoph_strace_") as fifo_path:
                 # 1. Add the -o option pointing to the FIFO
                 strace_command_with_output = strace_command + ["-o", fifo_path]
                 log.info(
-                    f"Executing strace command: {' '.join(shlex.quote(s) for s in strace_command_with_output)}"
+                    f"Executing strace command: "
+                    f"{' '.join(shlex.quote(s) for s in strace_command_with_output)}"
                 )
 
                 # 2. Launch strace process, capturing its stderr
@@ -392,19 +379,15 @@ class Strace(Backend):
                     name=f"strace_stderr_reader_{strace_pid}",
                 )
 
-                # --- Restore full consumer task ---
                 # 4. Start reading from the FIFO and processing in a separate task
                 self._output_read_task = asyncio.create_task(
-                    # --- FIX: Pass initial_pids to consumer ---
                     self._consume_fifo_stream(
                         fifo_path,
                         pid_cwd_map,
-                        attach_ids if attach_ids else self._initial_pids,
+                        attach_ids if attach_ids else list(self._initial_pids),
                     ),
-                    # -----------------------------------------
                     name=f"strace_fifo_processor_{strace_pid}",
                 )
-                # ----------------------------------
 
                 # 5. Wait for the main FIFO processor task OR strace process exit
                 process_wait_task = asyncio.create_task(
@@ -433,23 +416,25 @@ class Strace(Backend):
                     # Check if strace process also exited
                     if process.returncode is not None:
                         log.info(
-                            f"Strace process {strace_pid} also exited (code {process.returncode})."
+                            f"Strace process {strace_pid} also exited "
+                            f"(code {process.returncode})."
                         )
                     else:
                         log.warning(
-                            f"FIFO processing finished but strace process {strace_pid} still running?"
+                            f"FIFO processing finished but strace process "
+                            f"{strace_pid} still running?"
                         )
                         # Wait briefly for strace to exit naturally
                         try:
-                            await asyncio.wait_for(
-                                process_wait_task, timeout=1.0
-                            )  # Wait on the task
+                            await asyncio.wait_for(process_wait_task, timeout=1.0)
                             log.info(
-                                f"Strace process {strace_pid} exited after FIFO processing (code {process_wait_task.result()})."
+                                f"Strace process {strace_pid} exited after FIFO processing "
+                                f"(code {process_wait_task.result()})."
                             )
                         except asyncio.TimeoutError:
                             log.warning(
-                                f"Strace process {strace_pid} did not exit promptly after FIFO processing."
+                                f"Strace process {strace_pid} did not exit promptly "
+                                f"after FIFO processing."
                             )
 
                 # Ensure completed tasks are awaited to retrieve potential exceptions
@@ -461,7 +446,8 @@ class Strace(Backend):
                             pass  # Expected
                         except Exception as e:
                             log.exception(
-                                f"Error retrieving result from completed task {task.get_name()}: {e}"
+                                f"Error retrieving result from completed task "
+                                f"{task.get_name()}: {e}"
                             )
 
         except FileNotFoundError as e:
@@ -481,44 +467,17 @@ class Strace(Backend):
             if not self.should_stop:
                 await self.stop()  # Calls terminate_strace_process
 
-    # --- Restore full Consumer ---
-    async def _consume_fifo_stream(self, fifo_path, pid_cwd_map, attach_ids):
-        """Helper coroutine to read FIFO lines, parse, and process events."""
-        try:
-            # Get the async iterator for reading lines
-            fifo_output_lines = self._read_fifo(fifo_path, self._should_stop)
-
-            # Create the event stream using the parser
-            event_stream = parse_strace_stream(
-                fifo_output_lines,  # Read from our dedicated FIFO reader
-                self.monitor,
-                self._should_stop,
-                syscalls=self.syscalls,
-                attach_ids=attach_ids,  # Pass attach_ids to parser
-            )
-            # Process the event stream
-            # --- FIX: Pass self._initial_pids correctly ---
-            await self._process_event_stream(
-                event_stream, pid_cwd_map, self._initial_pids
-            )
-            # --------------------------------------------
-        except asyncio.CancelledError:
-            log.info("FIFO consumer task cancelled.")
-        except Exception as e:
-            log.exception(f"Error in FIFO consumer task: {e}")
-
-    # --- END Restore ---
-
-    # --- Attach Method ---
     async def attach(self, pids: list[int]):
         """Implementation of the attach method. Uses bytes CWD map and FIFO."""
         if not pids:
             return
+
         log.info(f"Attaching strace to PIDs/TIDs: {pids}")
         self._initial_pids = set(pids)
         pid_cwd_map: dict[int, bytes] = {}
+
         for pid in pids:
-            cwd: bytes | None = pid_get_cwd(pid)
+            cwd = pid_get_cwd(pid)
             if cwd:
                 pid_cwd_map[pid] = cwd
             else:
@@ -531,26 +490,26 @@ class Strace(Backend):
 
         strace_command = [
             strace_path,
-            *STRACE_BASE_OPTIONS,  # Does NOT include -o here
+            *STRACE_BASE_OPTIONS,
             "-e",
             f"trace={','.join(self.syscalls)}",
         ]
+
         valid_attach_ids = [str(pid) for pid in pids if psutil.pid_exists(pid)]
         if not valid_attach_ids:
             log.error("No valid PIDs/TIDs provided to attach to.")
             return
+
         strace_command.extend(["-p", ",".join(valid_attach_ids)])
 
         await self._launch_strace(strace_command, pid_cwd_map, attach_ids=pids)
 
-    # --- End Attach Method ---
-
-    # --- Run Command Method ---
     async def run_command(self, command: list[str]):
         """Implementation of the run_command method. Uses bytes CWD map and FIFO."""
         if not command:
             log.error(f"{self.__class__.__name__}.run_command called empty.")
             return
+
         log.info(
             f"Running command via strace: {' '.join(shlex.quote(c) for c in command)}"
         )
@@ -564,7 +523,7 @@ class Strace(Backend):
 
         strace_command = [
             strace_path,
-            *STRACE_BASE_OPTIONS,  # Does NOT include -o here
+            *STRACE_BASE_OPTIONS,
             "-e",
             f"trace={','.join(self.syscalls)}",
         ]
@@ -572,14 +531,12 @@ class Strace(Backend):
 
         await self._launch_strace(strace_command, pid_cwd_map, attach_ids=None)
 
-    # --- End Run Command Method ---
-
-    # --- Stop Method ---
     async def stop(self):
-        """Signals the backend's running task to stop and terminates the managed strace process."""
+        """Signals the backend's running task to stop and terminates the strace process."""
         if not self._should_stop.is_set():
             log.info("Stopping Strace backend...")
             self._should_stop.set()
+
             # Cancel the FIFO reader/processor task first
             if self._output_read_task and not self._output_read_task.done():
                 log.debug("Cancelling FIFO processor/logger task...")
@@ -608,8 +565,3 @@ class Strace(Backend):
             await terminate_strace_process(process_to_term, pid_to_term)
             self._strace_process = None
             log.info("Strace backend stopped.")
-
-    # --- End Stop Method ---
-
-
-# --- End Backend Class ---

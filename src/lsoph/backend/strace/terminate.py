@@ -4,7 +4,7 @@
 import asyncio
 import logging
 
-log = logging.getLogger(__name__)  # Use module-specific logger
+log = logging.getLogger(__name__)
 
 
 async def terminate_strace_process(
@@ -14,63 +14,55 @@ async def terminate_strace_process(
     # Check if process exists and is running
     if not process or process.returncode is not None:
         return
+
     log.warning(f"Attempting to terminate strace process (PID: {pid})...")
-    stderr_bytes = b""  # To store stderr
+    stderr_bytes = b""
 
     try:
         # Send SIGTERM first for graceful shutdown
         log.debug(f"Sending SIGTERM to strace process {pid}")
         process.terminate()
+
         # Wait for termination and capture stderr
         try:
-            # Use communicate() to read stderr and wait for process exit
-            # Note: If strace generates a LOT of output on termination, this might block
-            #       but it's generally safer than just waiting for exit code.
             _, stderr_bytes = await asyncio.wait_for(process.communicate(), timeout=1.5)
         except asyncio.TimeoutError:
-            # If timeout occurs, process didn't terminate gracefully
+            # Process didn't terminate gracefully
             log.warning(
                 f"Strace process {pid} did not exit after SIGTERM, sending SIGKILL."
             )
-            raise  # Re-raise timeout to trigger the kill block below
+            raise  # Re-raise timeout to trigger SIGKILL
         except Exception as comm_err:
-            # Handle errors during communication (e.g., broken pipe)
-            log.error(
-                f"Error communicating with strace process {pid} during terminate: {comm_err}"
-            )
-            # Assume process is stuck, proceed to kill
-            raise asyncio.TimeoutError  # Treat as timeout to trigger kill
+            log.error(f"Error during strace terminate: {comm_err}")
+            # Treat as timeout to trigger SIGKILL
+            raise asyncio.TimeoutError
 
-        # Log successful termination
         log.info(
-            f"Strace process {pid} terminated gracefully (SIGTERM, code {process.returncode})."
+            f"Strace process {pid} terminated gracefully (code {process.returncode})."
         )
-        # Log stderr if the exit code was non-zero OR if there was output
-        # (useful even on graceful exit if strace prints attach/detach messages)
         if stderr_bytes:
-            log.info(  # Changed to info level as attach/detach is normal
-                f"Strace {pid} stderr (exit {process.returncode}):\n{stderr_bytes.decode('utf-8', 'replace').strip()}"
+            log.info(
+                f"Strace {pid} stderr (exit {process.returncode}):\n"
+                f"{stderr_bytes.decode('utf-8', 'replace').strip()}"
             )
-        return  # Successful termination
+        return
 
     except ProcessLookupError:
-        # Process already exited before we could terminate
         log.warning(f"Strace process {pid} already exited before SIGTERM.")
         return
     except asyncio.TimeoutError:
-        # SIGTERM timed out, proceed to SIGKILL in the next block
+        # SIGTERM timed out, proceed to SIGKILL
         pass
     except Exception as term_err:
-        # Catch other errors during SIGTERM attempt
         log.exception(f"Error during SIGTERM for strace {pid}: {term_err}")
 
-    # --- SIGKILL Block ---
-    # This block executes if SIGTERM timed out or failed
+    # SIGKILL block - executes if SIGTERM timed out or failed
     if process.returncode is None:
         try:
             log.debug(f"Sending SIGKILL to strace process {pid}")
             process.kill()
-            # Wait briefly for kill and try to capture remaining stderr
+
+            # Wait briefly for kill and capture remaining stderr
             try:
                 _, stderr_bytes = await asyncio.wait_for(
                     process.communicate(), timeout=1.0
@@ -78,17 +70,13 @@ async def terminate_strace_process(
             except asyncio.TimeoutError:
                 log.error(f"Strace process {pid} did not exit even after SIGKILL!")
             except Exception as comm_err:
-                log.error(
-                    f"Error communicating with strace process {pid} after kill: {comm_err}"
-                )
+                log.error(f"Error communicating with strace after kill: {comm_err}")
 
-            log.info(
-                f"Strace process {pid} killed (SIGKILL, code {process.returncode})."
-            )
-            # Log any captured stderr after kill
+            log.info(f"Strace process {pid} killed (code {process.returncode}).")
             if stderr_bytes:
                 log.warning(
-                    f"Strace {pid} stderr (after kill, exit {process.returncode}):\n{stderr_bytes.decode('utf-8', 'replace').strip()}"
+                    f"Strace {pid} stderr (after kill):\n"
+                    f"{stderr_bytes.decode('utf-8', 'replace').strip()}"
                 )
 
         except ProcessLookupError:
