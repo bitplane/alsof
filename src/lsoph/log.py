@@ -61,6 +61,10 @@ class TextualLogHandler(logging.Handler):
             else:
                 markup = f"{timestamp} {plain_msg}"
 
+            if record.exc_info:
+                exc_text = self.formatter.formatException(record.exc_info)
+                markup += f"\n[red]{exc_text}[/red]"
+
             # Append the marked-up string to the shared queue
             self.log_queue.append(markup)
         except Exception:

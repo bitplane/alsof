@@ -13,7 +13,7 @@ log = logging.getLogger(__name__)
 DIRFD_RE = re.compile(r"^(?:AT_FDCWD|-100)$")
 
 
-class PathResolutionError(Exception):
+class PathResolutionError(KeyError):
     """Exception raised when a path cannot be resolved."""
 
     pass

@@ -1,9 +1,6 @@
 # Filename: src/lsoph/util/pid.py
-
-import argparse
 import logging
 import os
-import sys
 
 import psutil
 
@@ -101,6 +98,13 @@ def get_fd_path(pid: int, fd: int) -> bytes:
     """
     Retrieves the file path for a given file descriptor (fd) of a process with the specified PID.
     """
+    if not psutil.pid_exists(pid):
+        raise KeyError(f"PID {pid} does not exist.")
+
     proc = psutil.Process(pid)
-    target = next(f for f in proc.open_files() if f.fd == fd)
-    return os.fsencode(target.path)
+
+    fds = list(f for f in proc.open_files() if f.fd == fd)
+    if not fds:
+        raise KeyError(f"File descriptor {fd} not found for PID {pid}.")
+
+    return os.fsencode(fds[0].path)

@@ -84,9 +84,10 @@ class Monitor(Versioned):
         ):
             info.recent_event_types.append(event_type)
 
+    @changes
     def _update_pid_fd_map(self, pid: int, fd: int, path: bytes | None):
         """Updates or removes entries in the pid_fd_map."""
-        if path:  # Add or update mapping
+        if path:
             if pid not in self.pid_fd_map:
                 self.pid_fd_map[pid] = {}
 
@@ -103,12 +104,11 @@ class Monitor(Versioned):
     @changes
     def _remove_fd(self, pid: int, fd: int) -> FileInfo | None:
         """Removes an FD mapping and updates FileInfo state."""
-        path = self.get_path(pid, fd)
-
-        # Remove from pid_fd_map
         self._update_pid_fd_map(pid, fd, None)
 
-        if not path or path in STD_PATHS.values():
+        try:
+            path = self.get_path(pid, fd)
+        except KeyError:
             return None
 
         info = self.files.get(path)

@@ -4,19 +4,14 @@
 import asyncio
 import logging
 import os
-import pathlib
 import shlex
 import shutil
-import sys
-import tempfile
 from collections.abc import AsyncIterator
-from typing import Any, Set
+from typing import Set
 
 import psutil
 
-# Corrected import path for handlers and helpers
-from lsoph.backend.strace import handlers, helpers
-from lsoph.log import TRACE_LEVEL_NUM
+from lsoph.backend.strace import handlers
 from lsoph.monitor import Monitor
 from lsoph.util.fifo import temp_fifo
 from lsoph.util.pid import get_cwd as pid_get_cwd
@@ -28,7 +23,6 @@ from .terminate import terminate_strace_process
 
 log = logging.getLogger(__name__)
 
-# --- Constants ---
 STRACE_BASE_OPTIONS = ["-f", "-qq", "-s", "4096"]
 
 FILE_STRUCT_SYSCALLS = [
@@ -59,10 +53,8 @@ DEFAULT_SYSCALLS = sorted(
         | {"chdir", "fchdir"}
     )
 )
-# --- End Constants ---
 
 
-# --- Event Processing Helper ---
 async def _process_single_event(
     event: Syscall, monitor: Monitor, cwd_map: dict[int, bytes], initial_pids: Set[int]
 ):
@@ -144,8 +136,8 @@ async def _process_single_event(
         log.debug(f"Found handler for {syscall_name}: {handler.__name__}")
         try:
             handler(event, monitor, cwd_map)
-        except Exception as e:
-            log.exception(f"Handler error for {syscall_name} (event: {event!r}): {e}")
+        except Exception:
+            log.exception(f"Handler error for {syscall_name} (event: {event!r})")
     else:
         log.debug(f"No specific handler found for syscall: {syscall_name}")
 
