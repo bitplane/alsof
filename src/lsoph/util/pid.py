@@ -95,3 +95,12 @@ def get_cwd(pid: int) -> bytes | None:
         # Catch other potential psutil errors (e.g., ZombieProcess on some platforms)
         log.error(f"An unexpected error occurred getting CWD for PID {pid}: {e}")
         return None
+
+
+def get_fd_path(pid: int, fd: int) -> bytes:
+    """
+    Retrieves the file path for a given file descriptor (fd) of a process with the specified PID.
+    """
+    proc = psutil.Process(pid)
+    target = next(f for f in proc.open_files() if f.fd == fd)
+    return os.fsencode(target.path)

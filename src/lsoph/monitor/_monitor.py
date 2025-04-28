@@ -6,12 +6,12 @@ Stores paths as bytes.
 
 import logging
 import os
-import time
 from collections.abc import Iterator
 from typing import Any
 
 from upd8 import Versioned, changes, waits
 
+from ..util.pid import get_fd_path
 from ._fileinfo import FileInfo
 
 # Setup Logging
@@ -92,9 +92,9 @@ class Monitor(Versioned):
 
             self.pid_fd_map[pid][fd] = path
             log.debug(f"Mapping PID {pid} FD {fd} -> {os.fsdecode(path)!r}")
-        else:  # Remove mapping
+        else:
             if pid in self.pid_fd_map and fd in self.pid_fd_map[pid]:
-                removed_path = self.pid_fd_map[pid].pop(fd)
+                self.pid_fd_map[pid].pop(fd)
                 log.debug(f"Removed mapping for PID {pid} FD {fd}")
 
                 if not self.pid_fd_map[pid]:
@@ -508,6 +508,9 @@ class Monitor(Versioned):
         if path is not None:
             return path
 
-        # todo: fix mapping
+        path = get_fd_path(pid, fd)
+        if path:
+            self._update_pid_fd_map(pid, fd, path)
+            return path
 
         raise KeyError(f"pid={pid} does not have fd={fd}")
