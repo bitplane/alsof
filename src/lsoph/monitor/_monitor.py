@@ -10,7 +10,7 @@ import time
 from collections.abc import Iterator
 from typing import Any
 
-from lsoph.util.versioned import Versioned, changes, waits
+from upd8 import Versioned, changes, waits
 
 from ._fileinfo import FileInfo
 
@@ -21,7 +21,7 @@ log = logging.getLogger("lsoph.monitor")
 STDIN_PATH = b"<STDIN>"
 STDOUT_PATH = b"<STDOUT>"
 STDERR_PATH = b"<STDERR>"
-STD_PATHS = {STDIN_PATH, STDOUT_PATH, STDERR_PATH}
+STD_PATHS = {0: STDIN_PATH, 1: STDOUT_PATH, 2: STDERR_PATH}
 
 
 class Monitor(Versioned):
@@ -108,7 +108,7 @@ class Monitor(Versioned):
         # Remove from pid_fd_map
         self._update_pid_fd_map(pid, fd, None)
 
-        if not path or path in STD_PATHS:
+        if not path or path in STD_PATHS.values():
             return None
 
         info = self.files.get(path)
@@ -171,7 +171,7 @@ class Monitor(Versioned):
     @changes
     def ignore(self, path: bytes):
         """Adds a path to the ignore list and removes existing state for it."""
-        if not path or path in STD_PATHS or path in self.ignored_paths:
+        if not path or path in STD_PATHS.values() or path in self.ignored_paths:
             return
 
         log.info(f"Adding path to ignore list: {os.fsdecode(path)!r}")
@@ -196,7 +196,7 @@ class Monitor(Versioned):
     @changes
     def ignore_all(self):
         """Adds all currently tracked file paths to the ignore list."""
-        paths_to_ignore = [p for p in self.files.keys() if p not in STD_PATHS]
+        paths_to_ignore = [p for p in self.files.keys() if p not in STD_PATHS.values()]
         for path in paths_to_ignore:
             if path not in self.ignored_paths:
                 self.ignore(path)
@@ -364,8 +364,12 @@ class Monitor(Versioned):
         **details,
     ):
         """Handles a 'rename' event."""
-        old_is_ignored = old_path in self.ignored_paths or old_path in STD_PATHS
-        new_is_ignored = new_path in self.ignored_paths or new_path in STD_PATHS
+        old_is_ignored = (
+            old_path in self.ignored_paths or old_path in STD_PATHS.values()
+        )
+        new_is_ignored = (
+            new_path in self.ignored_paths or new_path in STD_PATHS.values()
+        )
 
         # Handle cases with ignored paths
         if new_is_ignored:
@@ -497,18 +501,13 @@ class Monitor(Versioned):
         return len(self.files)
 
     @waits
-    def get_path(self, pid: int, fd: int) -> bytes | None:
-        """Retrieves the path for a PID/FD, handling standard streams."""
-        path = self.pid_fd_map.get(pid, {}).get(fd)
+    def get_path(self, pid: int, fd: int) -> bytes:
+        """Retrieves the path for a PID/FD."""
+        path = STD_PATHS.get(fd) or self.pid_fd_map.get(pid, {}).get(fd)
+
         if path is not None:
             return path
 
-        # Handle standard streams
-        if fd == 0:
-            return STDIN_PATH
-        if fd == 1:
-            return STDOUT_PATH
-        if fd == 2:
-            return STDERR_PATH
+        # todo: fix mapping
 
-        return None
+        raise KeyError(f"pid={pid} does not have fd={fd}")
