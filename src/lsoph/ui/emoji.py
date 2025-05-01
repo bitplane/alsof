@@ -12,27 +12,24 @@ log = logging.getLogger("lsoph.ui.emoji")
 # Prioritize common file operations. Add more as needed.
 # Ensure these render as single width in most modern terminals.
 EVENT_EMOJI_MAP = {
-    "OPEN": "📂",  # File Folder (Represents opening)
-    "READ": "📖",  # Open Book (Represents reading)
-    "WRITE": "💾",  # Floppy Disk (Represents writing/saving)
-    # --- CHANGE: Changed back to Folder emoji for CLOSE ---
-    "CLOSE": "📁",  # File Folder (Represents closing, matching OPEN)
-    # ----------------------------------------------------
-    "DELETE": "❌",  # Cross Mark (Represents deletion)
-    "RENAME": "🔄",  # Arrows Counterclockwise (Represents renaming)
-    "STAT": "👀",  # Eyes (Represents stat/access/lookup)
-    "ACCESS": "👀",  # Group with STAT
-    "CHDIR": "🗺️",  # Map (Represents changing directory context)
-    "ERROR": "❗",  # Exclamation Mark (Represents an error state)
-    # Add fallbacks or other types if necessary
-    "UNKNOWN": "❔",  # Question Mark
+    "OPEN": "📂\u200b",  # File Folder (Represents opening)
+    "READ": "📖\u200b",  # Open Book (Represents reading)
+    "WRITE": "💾\u200b",  # Floppy Disk (Represents writing/saving)
+    "CLOSE": "📁\u200b",  # File Folder (Represents closing, matching OPEN)
+    "DELETE": "❌\u200b",  # Cross Mark (Represents deletion)
+    "RENAME": "🔄\u200b",  # Arrows Counterclockwise (Represents renaming)
+    "STAT": "👀\u200b",  # Eyes (Represents stat/access/lookup)
+    "ACCESS": "👀\u200b",  # Group with STAT
+    "CHDIR": "🗺️\u200b",  # Map (Represents changing directory context)
+    "ERROR": "❗\u200b",  # Exclamation Mark (Represents an error state)
+    "UNKNOWN": "❔\u200b",  # Question Mark
 }
 DEFAULT_EMOJI = EVENT_EMOJI_MAP["UNKNOWN"]
 
 # Special status overrides
 STATUS_EMOJI_MAP = {
-    "deleted": "❌",  # Cross Mark (Stronger indicator for deleted status)
-    "error": "❗",  # Exclamation Mark
+    "deleted": "❌\u200b",  # Cross Mark (Stronger indicator for deleted status)
+    "error": "❗\u200b",  # Exclamation Mark
 }
 
 
